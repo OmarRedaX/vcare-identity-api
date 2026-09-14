@@ -1,0 +1,1488 @@
+# SOURCE OF TRUTH for the identity-service HTTP API (public /api/*, /.well-known/jwks.json, and the
+# network-isolated /internal/* surface on the internal listener).
+# Human view: docs/architecture/api.md (derived from this file; on disagreement this file wins).
+# Hub sync copies this file to ../vcare-hub/contracts/identity-service.openapi.yaml — never edit the hub copy.
+# Change order (CLAUDE.md -> Build order for a new module): contract first, then code.
+# /internal/* changes are breaking for care-service: keep the old shape until Care has shipped against the new one.
+openapi: 3.1.0
+info:
+  title: vcare Identity Service API
+  version: 1.0.0
+  summary: Accounts, authentication, sessions, account status, and service-to-service tokens for vcare.
+  description: |
+    Identity owns **who someone is and whether they may act**.
+
+    - Public listener (`PORT`, default `3000`): `/api/*`, `/.well-known/jwks.json`.
+    - Internal listener (`INTERNAL_PORT`, default `3100`): `/internal/*`. Bound to the private interface only;
+      ingress never routes `/internal`. Every `/internal/*` operation except `/internal/auth/token` and
+      `/internal/health` requires a **service token** (`typ=service`); a user token (even an admin's) gets
+      `401 ServiceTokenRequired`.
+    - User access tokens are EdDSA (Ed25519) JWTs, 15 minutes, sent only as `Authorization: Bearer`.
+      Consumers verify them locally against `GET /.well-known/jwks.json`.
+    - Refresh tokens are opaque, 30 days, delivered only via the `vcare_rt` httpOnly cookie
+      (`Path=/api/auth`), rotated on every use with family-wide reuse detection.
+    - Every response carries `X-Request-Id`. Every error uses the single `ErrorEnvelope`.
+    - Every list is cursor-paginated (`cursor`, `limit` 1..100, default 20).
+
+    Vendor extensions on every operation: `x-roles` (roles allowed by the RBAC policy; `public` = no
+    principal; `service` = service token), `x-ownership` (`none` | `self` | `refresh-family`),
+    `x-error-codes` (every `ErrorCode` the operation may return), and on internal operations `x-scope`.
+  contact:
+    name: identity-team
+  license:
+    name: Proprietary
+    identifier: LicenseRef-vcare-proprietary
+servers:
+  - url: http://localhost:3000
+    description: Public listener (local dev) — serves /api/* and /.well-known/jwks.json
+  - url: http://localhost:3100
+    description: Internal listener (local dev, network-isolated) — serves /internal/* only
+security:
+  - bearerUser: []
+tags:
+  - name: auth
+    description: Registration, login, token refresh, logout, email verification, password flows, own profile.
+  - name: users
+    description: Admin user management — listing, lookup, account status, sessions.
+  - name: internal-users
+    description: Service-to-service user lookup and account status changes (internal listener only).
+  - name: service-auth
+    description: Client-credentials exchange for short-lived service tokens (internal listener only).
+  - name: keys
+    description: Public signing keys (JWKS) for local token verification by consumers.
+  - name: health
+    description: Liveness and dependency checks for both listeners.
+
+x-future-events:
+  description: |
+    MVP is HTTP-only; no message bus and no AsyncAPI contract exist yet (CLAUDE.md -> Out of scope).
+    These events are planned. `user.status_changed` closes the known gap where an admin changes a doctor's
+    status directly via PATCH /api/users/{id}/status (including reinstatement, suspended -> active) and
+    care-service is not notified.
+  events:
+    - name: user.registered
+      producer: identity-service
+      trigger: a user row is created by POST /api/auth/register
+      payload: [userId, role, status, occurredAt]
+    - name: user.status_changed
+      producer: identity-service
+      trigger: every committed change to users.status (a user_status_changes row is written)
+      payload: [userId, fromStatus, toStatus, actorUserId, actorService, reason, requestId, occurredAt]
+
+paths:
+  # ── auth ─────────────────────────────────────────────────────────────────────
+  /api/auth/register:
+    post:
+      operationId: registerUser
+      tags: [auth]
+      summary: Register a patient or doctor account
+      description: |
+        Creates a user with `role` patient or doctor (admins are never created here). Patients start
+        `status=active`, doctors start `status=pending`; `email_verified_at` is null for both. A verification
+        email is queued asynchronously — delivery failure never fails registration. Does not log the user in.
+        `Idempotency-Key` is **required**; same key + same body replays the original response, same key +
+        different body returns `422 IdempotencyConflict`. Rate limit: 5/h per IP.
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, Conflict, IdempotencyConflict, RateLimited, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Account created.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/IdempotencyConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Log in with email and password
+      description: |
+        Returns a 15-minute access token in the body and sets the rotating refresh token in the `vcare_rt`
+        cookie (new refresh-token family). Unknown email and wrong password return the same
+        `401 InvalidCredentials` with equalized timing. `suspended` / `rejected` accounts cannot log in;
+        `pending` doctors can (their token carries `status=pending`). Legacy bcrypt hashes are rehashed to
+        argon2id on success. Rate limits: 5/min per IP+email, 20/min per IP.
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, InvalidCredentials, AccountSuspended, AccountRejected, IdempotencyConflict, RateLimited, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated. Refresh token delivered only via Set-Cookie.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+            Set-Cookie: { $ref: '#/components/headers/SetRefreshCookie' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/LoginResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+        '403': { $ref: '#/components/responses/AccountStateForbidden' }
+        '422': { $ref: '#/components/responses/IdempotencyConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/auth/refresh:
+    post:
+      operationId: refreshAccessToken
+      tags: [auth]
+      summary: Rotate the refresh token and issue a new access token
+      description: |
+        Reads the `vcare_rt` cookie. In one transaction: revokes the presented token
+        (`revoked_reason='rotated'`, `replaced_by_id`) and issues a new token in the same family.
+        Presenting an already-rotated token revokes the **entire family** (`reuse_detected`) and returns
+        `401 RefreshTokenReused`. The user is re-read: `suspended` / `rejected` revokes the family and returns
+        403. On any 401/403 the cookie is cleared. Rate limit: 30/min per family. Budget p95 < 50 ms.
+      security:
+        - refreshCookie: []
+      x-roles: [patient, doctor, admin]
+      x-ownership: refresh-family
+      x-error-codes: [RefreshTokenInvalid, RefreshTokenReused, AccountSuspended, AccountRejected, RateLimited, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: New access token; rotated refresh token in Set-Cookie.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+            Set-Cookie: { $ref: '#/components/headers/SetRefreshCookie' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/AccessTokenResponse' }
+        '401': { $ref: '#/components/responses/RefreshUnauthorized' }
+        '403': { $ref: '#/components/responses/AccountStateForbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Log out — revoke the refresh-token family and clear the cookie
+      description: |
+        Revokes the family of the presented `vcare_rt` token (`revoked_reason='logout'`) and clears the cookie.
+        Always returns 204, including when the cookie is absent, unknown, or already revoked, so clients can
+        call it unconditionally. The already-issued access token remains valid until it expires (at most 15 min).
+      security:
+        - refreshCookie: []
+        - {}
+      x-roles: [patient, doctor, admin]
+      x-ownership: refresh-family
+      x-error-codes: [InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '204':
+          description: Logged out; cookie cleared.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+            Set-Cookie: { $ref: '#/components/headers/ClearRefreshCookie' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/auth/verify-email:
+    post:
+      operationId: verifyEmail
+      tags: [auth]
+      summary: Verify an email address with a one-time token
+      description: |
+        Consumes a 24-hour, single-use verification token (only its sha256 is stored) and sets
+        `email_verified_at` once. Re-verifying an already verified account is a no-op 204. An unknown,
+        expired, used, or superseded token returns `400 ValidationFailed` with `details[].field = "token"`.
+        The next access token issued after verification carries `ev=true`. Rate limit: 10/h per IP.
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, IdempotencyConflict, RateLimited, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyEmailRequest'
+      responses:
+        '204':
+          description: Email verified (or already verified).
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/IdempotencyConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/auth/resend-verification:
+    post:
+      operationId: resendVerification
+      tags: [auth]
+      summary: Queue a new verification email
+      description: |
+        Always returns 204 whether or not the email exists or is already verified (no account enumeration).
+        When a matching unverified live account exists, earlier unused verification tokens are invalidated
+        and a new one is emailed asynchronously. Rate limit: 3/h per email.
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, IdempotencyConflict, RateLimited, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendVerificationRequest'
+      responses:
+        '204':
+          description: Accepted.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/IdempotencyConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/auth/forgot-password:
+    post:
+      operationId: forgotPassword
+      tags: [auth]
+      summary: Request a password-reset email
+      description: |
+        Always returns 204 regardless of whether the email exists. When a live account matches, earlier unused
+        reset tokens are invalidated and a 30-minute single-use token is emailed asynchronously.
+        Rate limit: 3/h per email.
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, IdempotencyConflict, RateLimited, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPasswordRequest'
+      responses:
+        '204':
+          description: Accepted.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/IdempotencyConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/auth/reset-password:
+    post:
+      operationId: resetPassword
+      tags: [auth]
+      summary: Set a new password using a reset token
+      description: |
+        Consumes a 30-minute single-use reset token, sets the new argon2id hash, marks the token `used_at`,
+        and revokes **all** refresh-token families for the user in the same transaction. An unknown, expired,
+        used, or superseded token returns `400 ValidationFailed` with `details[].field = "token"`.
+        `suspended` / `rejected` accounts may reset their password but still cannot log in.
+        Rate limit: 10/h per IP.
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, IdempotencyConflict, RateLimited, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '204':
+          description: Password reset; all sessions revoked.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/IdempotencyConflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/auth/change-password:
+    post:
+      operationId: changePassword
+      tags: [auth]
+      summary: Change own password
+      description: |
+        Requires the current password (wrong current password → `401 InvalidCredentials`). Sets the new
+        argon2id hash and revokes every refresh-token family **except** the family of the `vcare_rt` cookie
+        sent with this request (the cookie path `/api/auth` covers this route); with no cookie, all families
+        are revoked.
+      x-roles: [patient, doctor, admin]
+      x-ownership: self
+      x-error-codes: [ValidationFailed, Unauthorized, TokenExpired, InvalidCredentials, AccountSuspended, AccountRejected, IdempotencyConflict, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '204':
+          description: Password changed; other sessions revoked.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/UnauthorizedOrInvalidCredentials' }
+        '403': { $ref: '#/components/responses/AccountStateForbidden' }
+        '422': { $ref: '#/components/responses/IdempotencyConflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/auth/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: Get own account
+      x-roles: [patient, doctor, admin]
+      x-ownership: self
+      x-error-codes: [Unauthorized, TokenExpired, AccountSuspended, AccountRejected, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: The caller's account.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountStateForbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    patch:
+      operationId: updateMe
+      tags: [auth]
+      summary: Update own profile fields
+      description: |
+        Only `fullName`, `phone`, `avatarUrl`, `timezone`, `locale` may change. Any other property —
+        including `email`, `role`, `status` — is rejected with `400 ValidationFailed` (unknown properties are
+        forbidden). `timezone` must be a valid IANA zone; `locale` a BCP-47 tag.
+      x-roles: [patient, doctor, admin]
+      x-ownership: self
+      x-error-codes: [ValidationFailed, Unauthorized, TokenExpired, AccountSuspended, AccountRejected, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMeRequest'
+      responses:
+        '200':
+          description: Updated account.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/AccountStateForbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ── users (admin) ────────────────────────────────────────────────────────────
+  /api/users:
+    get:
+      operationId: listUsers
+      tags: [users]
+      summary: List users (admin)
+      description: |
+        Keyset-paginated on `(created_at DESC, id DESC)`. Filters are whitelisted: `role`, `status`, `email`
+        (exact, case-insensitive). Soft-deleted users are never listed.
+      x-roles: [admin]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, Unauthorized, TokenExpired, Forbidden, AccountSuspended, AccountRejected, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: role
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/UserRole' }
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/UserStatus' }
+        - name: email
+          in: query
+          required: false
+          schema: { type: string, format: email, maxLength: 254 }
+      responses:
+        '200':
+          description: A page of users.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    required: [meta]
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/User' }
+                      meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/users/{id}:
+    get:
+      operationId: getUserById
+      tags: [users]
+      summary: Get a user by id (admin)
+      x-roles: [admin]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, Unauthorized, TokenExpired, Forbidden, AccountSuspended, AccountRejected, NotFound, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: The user.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/users/{id}/status:
+    patch:
+      operationId: updateUserStatus
+      tags: [users]
+      summary: Change a user's account status (admin)
+      description: |
+        Admin-allowed transitions: `active → suspended`, `suspended → active`. Anything else →
+        `409 InvalidStatusTransition`. An admin cannot target themselves or another admin (`403 Forbidden`).
+        Setting the current status again returns 200 with no new history row. Entering `suspended` revokes all
+        refresh-token families. The status update, revocation, and `user_status_changes` row
+        (`actor_user_id` = caller, `actor_service` = null) commit in one transaction.
+
+        `suspended → active` (reinstatement) is available **only** here (admin), never on the internal route.
+
+        Known MVP gap: care-service is **not** notified of changes made here. Mitigations until
+        `user.status_changed` exists (see `x-future-events`): (1) the admin console routes doctor suspension
+        through Care (`PATCH /admin/doctors/:id/suspend`, which calls the internal route); (2) Care reads
+        `status` from batch hydration and hides non-active doctors from search when that data is fresh.
+        Reinstating a suspended doctor is **not** reflected in Care in MVP (out of scope).
+      x-roles: [admin]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, Unauthorized, TokenExpired, Forbidden, AccountSuspended, AccountRejected, NotFound, InvalidStatusTransition, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminStatusChangeRequest'
+      responses:
+        '200':
+          description: Status applied (or already in the requested status).
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/StatusChangeResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidStatusTransition' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/users/{id}/sessions:
+    get:
+      operationId: listUserSessions
+      tags: [users]
+      summary: List a user's active sessions (admin)
+      description: |
+        One session = one live refresh-token family (at least one token not revoked and not expired).
+        Keyset-paginated on `(created_at DESC, family_id)` of the family's first token. Token values and
+        hashes are never returned.
+      x-roles: [admin]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, Unauthorized, TokenExpired, Forbidden, AccountSuspended, AccountRejected, NotFound, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page of sessions.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    required: [meta]
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Session' }
+                      meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      operationId: revokeUserSessions
+      tags: [users]
+      summary: Revoke all of a user's sessions (admin)
+      description: |
+        Revokes every refresh-token family of the user (`revoked_reason='admin_revoked'`). Idempotent: a user
+        with no live sessions still returns 204. Access tokens already issued expire within 15 minutes.
+      x-roles: [admin]
+      x-ownership: none
+      x-error-codes: [ValidationFailed, Unauthorized, TokenExpired, Forbidden, AccountSuspended, AccountRejected, NotFound, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '204':
+          description: All sessions revoked.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ── keys + public health ─────────────────────────────────────────────────────
+  /.well-known/jwks.json:
+    get:
+      operationId: getJwks
+      tags: [keys]
+      summary: Public signing keys (JWKS)
+      description: |
+        Current and previous Ed25519 public keys (RFC 7517 / RFC 8037). Returned as a bare JWK Set, **not**
+        wrapped in the success envelope, so standard JOSE libraries can consume it. Cached
+        (`Cache-Control: public, max-age=300`). Budget p95 < 10 ms.
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-error-codes: [InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: JWK Set.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control:
+              description: Consumers may cache the key set for 5 minutes.
+              schema: { type: string, const: 'public, max-age=300' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Jwks' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/health:
+    get:
+      operationId: getPublicHealth
+      tags: [health]
+      summary: Public listener health (Postgres + Redis)
+      description: Returned as a bare health object (not enveloped) so load balancers and probes can read it.
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-error-codes: []
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: All dependencies reachable.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+        '503':
+          description: At least one dependency unreachable.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+              example:
+                status: degraded
+                checks: { database: up, redis: down }
+
+  # ── internal (internal listener only) ────────────────────────────────────────
+  /internal/auth/token:
+    servers:
+      - url: http://localhost:3100
+        description: Internal listener (network-isolated)
+    post:
+      operationId: issueServiceToken
+      tags: [service-auth]
+      summary: Exchange client credentials for a service token
+      description: |
+        OAuth 2.0 client-credentials grant. `client_secret` is verified against
+        `service_clients.client_secret_hash` (argon2id); every requested scope must be in `allowed_scopes`
+        and the requested audience in `allowed_audiences`. Returns a 300-second JWT (`typ=service`,
+        `sub=<client_id>`, `aud=<audience>`, `scope`, `jti`). No refresh token — callers re-exchange before
+        expiry. Field names are snake_case (OAuth 2.0 wire format) inside the standard envelope.
+        Unknown client, wrong secret, and disabled client all return `401 InvalidCredentials`.
+        Rate limit: 60/min per client.
+      security: []
+      x-roles: [service]
+      x-ownership: none
+      x-scope: none
+      x-error-codes: [ValidationFailed, InvalidCredentials, InsufficientScope, RateLimited, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceTokenRequest'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ServiceTokenRequest'
+      responses:
+        '200':
+          description: Service token issued.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ServiceTokenResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+        '403': { $ref: '#/components/responses/InsufficientScope' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /internal/users:
+    servers:
+      - url: http://localhost:3100
+        description: Internal listener (network-isolated)
+    get:
+      operationId: batchGetUsers
+      tags: [internal-users]
+      summary: Batch user profile lookup (Integration Case 2)
+      description: |
+        One query: `WHERE id = ANY($1) AND deleted_at IS NULL`. 1..100 comma-separated ids (more →
+        `400 ValidationFailed`). Unknown or soft-deleted ids are **omitted**, not errors; order of `data` is not
+        guaranteed. Returns no email or phone. No outbound calls. Budget p95 < 50 ms for 100 ids.
+      security:
+        - serviceToken: []
+      x-roles: [service]
+      x-ownership: none
+      x-scope: users:read
+      x-error-codes: [ValidationFailed, ServiceTokenRequired, InsufficientScope, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - name: ids
+          in: query
+          required: true
+          description: Comma-separated positive integer user ids, 1..100 entries (e.g. `ids=1,2,3`).
+          style: form
+          explode: false
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 100
+            items: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '200':
+          description: Summaries for the ids that exist.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        maxItems: 100
+                        items: { $ref: '#/components/schemas/UserSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/ServiceTokenRequired' }
+        '403': { $ref: '#/components/responses/InsufficientScope' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /internal/users/{id}/status:
+    servers:
+      - url: http://localhost:3100
+        description: Internal listener (network-isolated)
+    patch:
+      operationId: internalUpdateUserStatus
+      tags: [internal-users]
+      summary: Apply an account status decided by Care (Integration Cases 1 and 3)
+      description: |
+        Care-allowed transitions: `pending → active|rejected` (Case 1), `rejected → pending` (Care re-opened a
+        rejected application), `active → suspended` (Case 3). `suspended → active` is **not** available here —
+        reinstatement is an admin-only action on the public API and is not propagated to Care in MVP.
+        **Idempotent:** setting the status the user already has returns 200 with no new history row, so Care can
+        retry blindly (already `suspended` → 200 and still ensures no live refresh tokens remain).
+        Every other pair → `409 InvalidStatusTransition`, which callers must treat as **non-retryable**
+        (e.g. Case 3 on a target that is not `active` signals drift: Care alerts instead of retrying).
+        Entering `suspended` or `rejected` revokes **all** refresh-token families. The status update,
+        revocation, and `user_status_changes` row (`actor_user_id` = body `actorUserId` recorded as data only,
+        `actor_service` = token `sub`, `request_id`) commit in **one transaction**; only then 200.
+        No outbound calls. Budget p95 < 50 ms.
+      security:
+        - serviceToken: []
+      x-roles: [service]
+      x-ownership: none
+      x-scope: users:status:write
+      x-error-codes: [ValidationFailed, ServiceTokenRequired, InsufficientScope, NotFound, InvalidStatusTransition, InternalError]
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatusChangeRequest'
+      responses:
+        '200':
+          description: Status applied (or already in the requested status).
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/StatusChangeResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/ServiceTokenRequired' }
+        '403': { $ref: '#/components/responses/InsufficientScope' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidStatusTransition' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /internal/health:
+    servers:
+      - url: http://localhost:3100
+        description: Internal listener (network-isolated)
+    get:
+      operationId: getInternalHealth
+      tags: [health]
+      summary: Internal listener health (Postgres + Redis)
+      description: No token required; reachable only on the private network. Bare health object (not enveloped).
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-scope: none
+      x-error-codes: []
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: All dependencies reachable.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+        '503':
+          description: At least one dependency unreachable.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+
+components:
+  securitySchemes:
+    bearerUser:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        User access token. EdDSA (Ed25519), `kid` header, TTL 900 s. Claims: `iss=vcare-identity`,
+        `aud=["vcare-identity","vcare-care"]`, `sub=<user id as string>`, `typ=user`, `role`, `status`,
+        `ev` (email verified), `iat`, `exp`, `jti`. Never in a cookie or URL.
+    serviceToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Service token from `POST /internal/auth/token`. EdDSA, TTL 300 s. Claims: `iss=vcare-identity`,
+        `sub=<client_id>`, `typ=service`, `aud` (must include `vcare-identity` for these routes),
+        `scope` (space-separated), `jti`. A `typ=user` token is rejected with `401 ServiceTokenRequired`.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: vcare_rt
+      description: |
+        Opaque 256-bit refresh token (only its sha256 is stored). `HttpOnly; Secure; SameSite=Strict;
+        Path=/api/auth; Max-Age=2592000`. Rotated on every use.
+
+  parameters:
+    RequestIdHeader:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Caller-supplied request id (UUID). Non-UUID values are replaced by a generated id. Echoed on every response.
+      schema: { type: string, format: uuid }
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID. Stored 24 h keyed by (route, principal-or-ip, key) with a body hash.
+      schema: { type: string, format: uuid }
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Optional UUID. Stored 24 h keyed by (route, principal-or-ip, key) with a body hash.
+      schema: { type: string, format: uuid }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque cursor from a previous page's `meta.nextCursor` (encodes the sort value and id).
+      schema: { type: string, maxLength: 512 }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    UserId:
+      name: id
+      in: path
+      required: true
+      description: Numeric user id.
+      schema: { type: integer, format: int64, minimum: 1 }
+
+  headers:
+    XRequestId:
+      description: The request id adopted or generated for this request.
+      schema: { type: string, format: uuid }
+    CacheControlNoStore:
+      description: Every /api/auth/* and token response is non-cacheable.
+      schema: { type: string, const: no-store }
+    SetRefreshCookie:
+      description: Sets the rotated refresh token.
+      schema:
+        type: string
+        examples:
+          - 'vcare_rt=kq3V0bXhZr9m1p2Yc8wS4tL7nA6eD5fG0hJ2iK3lM9o; HttpOnly; Secure; SameSite=Strict; Path=/api/auth; Max-Age=2592000'
+    ClearRefreshCookie:
+      description: Clears the refresh token cookie.
+      schema:
+        type: string
+        examples:
+          - 'vcare_rt=; HttpOnly; Secure; SameSite=Strict; Path=/api/auth; Max-Age=0'
+    RetryAfter:
+      description: Seconds until the limiter window allows another request.
+      schema: { type: integer, minimum: 1 }
+
+  responses:
+    BadRequest:
+      description: Validation failed.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            ValidationFailed:
+              value:
+                success: false
+                error:
+                  code: ValidationFailed
+                  message: Request validation failed
+                  details:
+                    - field: email
+                      issue: must be an email
+                  requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b
+    Unauthorized:
+      description: Missing, invalid, or expired bearer token.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            Unauthorized:
+              value:
+                success: false
+                error: { code: Unauthorized, message: Authentication required, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+            TokenExpired:
+              value:
+                success: false
+                error: { code: TokenExpired, message: Access token expired, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    InvalidCredentials:
+      description: Credentials rejected (never reveals which part was wrong).
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            InvalidCredentials:
+              value:
+                success: false
+                error: { code: InvalidCredentials, message: Invalid credentials, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    UnauthorizedOrInvalidCredentials:
+      description: Bearer token missing/invalid/expired, or the current password is wrong.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            Unauthorized:
+              value:
+                success: false
+                error: { code: Unauthorized, message: Authentication required, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+            TokenExpired:
+              value:
+                success: false
+                error: { code: TokenExpired, message: Access token expired, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+            InvalidCredentials:
+              value:
+                success: false
+                error: { code: InvalidCredentials, message: Invalid credentials, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    RefreshUnauthorized:
+      description: Refresh token missing, unknown, expired, revoked, or reused. The cookie is cleared.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        Set-Cookie: { $ref: '#/components/headers/ClearRefreshCookie' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            RefreshTokenInvalid:
+              value:
+                success: false
+                error: { code: RefreshTokenInvalid, message: Refresh token is invalid, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+            RefreshTokenReused:
+              value:
+                success: false
+                error: { code: RefreshTokenReused, message: Refresh token reuse detected; session revoked, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    ServiceTokenRequired:
+      description: No valid service token (a user token is always rejected here).
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            ServiceTokenRequired:
+              value:
+                success: false
+                error: { code: ServiceTokenRequired, message: A valid service token is required, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    Forbidden:
+      description: Role or ownership check failed, or the caller's account state forbids the action.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            Forbidden:
+              value:
+                success: false
+                error: { code: Forbidden, message: You are not allowed to perform this action, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+            AccountSuspended:
+              value:
+                success: false
+                error: { code: AccountSuspended, message: Account is suspended, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+            AccountRejected:
+              value:
+                success: false
+                error: { code: AccountRejected, message: Account is rejected, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    AccountStateForbidden:
+      description: The account is suspended or rejected.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            AccountSuspended:
+              value:
+                success: false
+                error: { code: AccountSuspended, message: Account is suspended, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+            AccountRejected:
+              value:
+                success: false
+                error: { code: AccountRejected, message: Account is rejected, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    InsufficientScope:
+      description: The service token (or requested scope) lacks the required scope.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            InsufficientScope:
+              value:
+                success: false
+                error: { code: InsufficientScope, message: Token lacks the required scope, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    NotFound:
+      description: Resource absent or not visible to the caller.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            NotFound:
+              value:
+                success: false
+                error: { code: NotFound, message: Resource not found, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    Conflict:
+      description: Conflicts with existing state (e.g. email already registered).
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            Conflict:
+              value:
+                success: false
+                error: { code: Conflict, message: Email is already registered, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    InvalidStatusTransition:
+      description: The requested status change is not allowed from the current status for this caller. Non-retryable.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            InvalidStatusTransition:
+              value:
+                success: false
+                error: { code: InvalidStatusTransition, message: Cannot change status from rejected to active, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    IdempotencyConflict:
+      description: Same Idempotency-Key reused with a different request body.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            IdempotencyConflict:
+              value:
+                success: false
+                error: { code: IdempotencyConflict, message: Idempotency-Key was used with a different request body, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    RateLimited:
+      description: Rate limiter tripped.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            RateLimited:
+              value:
+                success: false
+                error: { code: RateLimited, message: Too many requests, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+    InternalError:
+      description: Unhandled error. No stack trace or internals in the body.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          examples:
+            InternalError:
+              value:
+                success: false
+                error: { code: InternalError, message: Internal server error, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+
+  schemas:
+    # ── envelopes ──
+    SuccessEnvelope:
+      type: object
+      description: Base success envelope. Operations narrow `data` (and `meta` for lists) with allOf.
+      required: [success, data]
+      properties:
+        success: { type: boolean, const: true }
+        data:
+          description: Operation-specific payload.
+        meta:
+          type: object
+          description: Present only when the operation returns metadata (e.g. pagination).
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, const: false }
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string, description: 'Human-readable; clients branch on `code`, never on `message`.' }
+            details:
+              type: array
+              items: { $ref: '#/components/schemas/ErrorDetail' }
+            requestId: { type: string, format: uuid }
+    ErrorDetail:
+      type: object
+      required: [field, issue]
+      properties:
+        field: { type: string, examples: [email] }
+        issue: { type: string, examples: [must be an email] }
+    ErrorCode:
+      type: string
+      description: Stable forever once shipped (CLAUDE.md -> API conventions).
+      enum:
+        - ValidationFailed
+        - Unauthorized
+        - TokenExpired
+        - InvalidCredentials
+        - RefreshTokenInvalid
+        - RefreshTokenReused
+        - EmailNotVerified
+        - AccountPending
+        - AccountSuspended
+        - AccountRejected
+        - Forbidden
+        - ServiceTokenRequired
+        - InsufficientScope
+        - NotFound
+        - Conflict
+        - InvalidStatusTransition
+        - IdempotencyConflict
+        - RateLimited
+        - InternalError
+    PaginationMeta:
+      type: object
+      required: [nextCursor, hasMore, count]
+      properties:
+        nextCursor: { type: [string, 'null'], description: Opaque cursor for the next page; null when `hasMore` is false. }
+        hasMore: { type: boolean }
+        count: { type: integer, minimum: 0, description: Number of items in this page. }
+
+    # ── domain ──
+    UserRole:
+      type: string
+      enum: [patient, doctor, admin]
+    UserStatus:
+      type: string
+      enum: [pending, active, suspended, rejected]
+    User:
+      type: object
+      required: [id, email, phone, fullName, avatarUrl, role, status, emailVerifiedAt, timezone, locale, createdAt, updatedAt]
+      properties:
+        id: { type: integer, format: int64, examples: [1042] }
+        email: { type: string, format: email, examples: [amira.patient@example.test] }
+        phone: { type: [string, 'null'], description: E.164, pattern: '^\+[1-9][0-9]{7,14}$', examples: ['+201000000001'] }
+        fullName: { type: string, minLength: 1, maxLength: 120, examples: [Amira Hassan] }
+        avatarUrl: { type: [string, 'null'], format: uri, maxLength: 2048 }
+        role: { $ref: '#/components/schemas/UserRole' }
+        status: { $ref: '#/components/schemas/UserStatus' }
+        emailVerifiedAt: { type: [string, 'null'], format: date-time }
+        timezone: { type: string, description: IANA time zone, examples: [Africa/Cairo] }
+        locale: { type: string, description: BCP-47 tag, examples: [ar-EG] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    UserSummary:
+      type: object
+      description: Internal batch shape. Never contains email or phone.
+      required: [id, fullName, avatarUrl, role, status, timezone, locale]
+      properties:
+        id: { type: integer, format: int64 }
+        fullName: { type: string }
+        avatarUrl: { type: [string, 'null'], format: uri }
+        role: { $ref: '#/components/schemas/UserRole' }
+        status: { $ref: '#/components/schemas/UserStatus' }
+        timezone: { type: string }
+        locale: { type: string }
+    Session:
+      type: object
+      description: One live refresh-token family.
+      required: [familyId, deviceInfo, createdAt, lastUsedAt, expiresAt]
+      properties:
+        familyId: { type: string, format: uuid }
+        deviceInfo: { type: [string, 'null'], maxLength: 255, description: Truncated User-Agent captured at login. }
+        createdAt: { type: string, format: date-time, description: When the family was created (login). }
+        lastUsedAt: { type: string, format: date-time, description: When the family's current token was issued. }
+        expiresAt: { type: string, format: date-time, description: Expiry of the family's current token. }
+    AccessTokenResponse:
+      type: object
+      required: [accessToken, tokenType, expiresIn]
+      properties:
+        accessToken: { type: string, description: EdDSA-signed JWT (typ=user). }
+        tokenType: { type: string, const: Bearer }
+        expiresIn: { type: integer, const: 900, description: Seconds until the access token expires. }
+    LoginResponse:
+      allOf:
+        - $ref: '#/components/schemas/AccessTokenResponse'
+        - type: object
+          required: [user]
+          properties:
+            user: { $ref: '#/components/schemas/User' }
+    StatusChangeResponse:
+      type: object
+      required: [id, status, updatedAt]
+      properties:
+        id: { type: integer, format: int64 }
+        status: { $ref: '#/components/schemas/UserStatus' }
+        updatedAt: { type: string, format: date-time }
+    ServiceTokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in, scope]
+      properties:
+        access_token: { type: string, description: EdDSA-signed JWT (typ=service). }
+        token_type: { type: string, const: Bearer }
+        expires_in: { type: integer, const: 300 }
+        scope: { type: string, description: 'Granted scopes, space-separated.', examples: ['users:read users:status:write'] }
+    Jwks:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/Jwk' }
+    Jwk:
+      type: object
+      required: [kty, crv, x, kid, alg, use]
+      properties:
+        kty: { type: string, const: OKP }
+        crv: { type: string, const: Ed25519 }
+        x: { type: string, description: base64url public key }
+        kid: { type: string, examples: [identity-2026-09] }
+        alg: { type: string, const: EdDSA }
+        use: { type: string, const: sig }
+    HealthStatus:
+      type: object
+      required: [status, checks]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        checks:
+          type: object
+          required: [database, redis]
+          properties:
+            database: { type: string, enum: [up, down] }
+            redis: { type: string, enum: [up, down] }
+
+    # ── request bodies ──
+    Password:
+      type: string
+      format: password
+      minLength: 10
+      maxLength: 128
+      description: 10..128 characters; rejected if on the breached-password denylist.
+    OneTimeToken:
+      type: string
+      description: 256-bit random token, base64url (as delivered in the email link).
+      pattern: '^[A-Za-z0-9_-]{43}$'
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password, fullName, role, timezone, locale]
+      properties:
+        email: { type: string, format: email, maxLength: 254, examples: [amira.patient@example.test] }
+        password: { $ref: '#/components/schemas/Password' }
+        fullName: { type: string, minLength: 1, maxLength: 120 }
+        role: { type: string, enum: [patient, doctor], description: admin is never accepted. }
+        phone: { type: string, pattern: '^\+[1-9][0-9]{7,14}$' }
+        timezone: { type: string, description: IANA time zone, examples: [Africa/Cairo] }
+        locale: { type: string, description: BCP-47 tag, examples: [ar-EG] }
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, format: password, minLength: 1, maxLength: 128 }
+    VerifyEmailRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token: { $ref: '#/components/schemas/OneTimeToken' }
+    ResendVerificationRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+    ForgotPasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+    ResetPasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [token, newPassword]
+      properties:
+        token: { $ref: '#/components/schemas/OneTimeToken' }
+        newPassword: { $ref: '#/components/schemas/Password' }
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword: { type: string, format: password, minLength: 1, maxLength: 128 }
+        newPassword: { $ref: '#/components/schemas/Password' }
+    UpdateMeRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        fullName: { type: string, minLength: 1, maxLength: 120 }
+        phone: { type: [string, 'null'], pattern: '^\+[1-9][0-9]{7,14}$' }
+        avatarUrl: { type: [string, 'null'], format: uri, maxLength: 2048 }
+        timezone: { type: string, description: IANA time zone }
+        locale: { type: string, description: BCP-47 tag }
+    AdminStatusChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: { type: string, enum: [active, suspended], description: Admin-reachable target statuses. }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    StatusChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [status, reason, actorUserId]
+      properties:
+        status:
+          type: string
+          enum: [active, rejected, pending, suspended]
+          description: |
+            Target status decided by Care. `active`/`rejected` = verification decision (Case 1); `pending` = Care
+            re-opened a rejected application; `suspended` = suspension (Case 3). Which pairs are valid is enforced
+            by the service (else 409 InvalidStatusTransition, non-retryable).
+        reason: { type: string, minLength: 1, maxLength: 500 }
+        actorUserId:
+          type: integer
+          format: int64
+          minimum: 1
+          description: The admin who decided in Care. Recorded as data in user_status_changes; never used for authorization.
+    ServiceTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [grant_type, client_id, client_secret, scope, audience]
+      properties:
+        grant_type: { type: string, const: client_credentials }
+        client_id: { type: string, pattern: '^[a-z][a-z0-9-]{2,63}$', examples: [care-service] }
+        client_secret: { type: string, format: password, minLength: 32, maxLength: 256 }
+        scope: { type: string, pattern: '^[a-z]+(:[a-z]+)+( [a-z]+(:[a-z]+)+)*$', examples: ['users:read users:status:write'] }
+        audience: { type: string, pattern: '^vcare-[a-z0-9-]+$', examples: [vcare-identity] }

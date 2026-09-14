@@ -1,0 +1,275 @@
+---
+title: Identity Service — Data Model
+owner: identity-team
+service: identity-service
+status: draft
+diataxis: reference
+last_verified: 2026-09-14
+tags: [architecture, data-model, postgresql, schema, indexes]
+related: [system-design, overview, auth-tokens, service-auth, adr-0001-no-orm-knex-raw-sql]
+---
+
+# Data Model
+
+Planned schema for the identity PostgreSQL database. Tables are created **by the module that needs
+them, when it is built** (raw-SQL Knex migrations, `write-migration` skill) — none exist yet. Every rule
+here comes from CLAUDE.md → Database rules; when a migration is written, this page is reconciled with it.
+
+## Conventions applied to every table
+- PK `id BIGSERIAL`; FK columns `BIGINT`, each FK named `fk_<table>_<col>` and covered by an index whose
+  leading column is the FK column.
+- Every timestamp is `TIMESTAMPTZ` (UTC; pool runs `SET TIME ZONE 'UTC'`).
+- Enum-like columns: `VARCHAR(n) NOT NULL CHECK (col IN (...))`, constraint `chk_<table>_<what>`.
+- No defaults on `role` or `status` — the service always sets them.
+- Secrets are hashes only: argon2id for passwords and client secrets; sha256 (hex, `CHAR(64)`) for
+  256-bit random tokens.
+- Soft delete via `deleted_at` on business tables; uniqueness among live rows via partial unique indexes.
+  Token and history tables are append/revoke-only (no `deleted_at`; they are never user-deletable and
+  expired rows are purged by a background job, never in a request).
+- Every index exists for a named query; composite order is equality columns, then range/sort column.
+- Required extension: `citext`.
+
+## ERD
+
+```mermaid
+erDiagram
+    users ||--o{ refresh_tokens : "has sessions"
+    users ||--o{ password_resets : "requests"
+    users ||--o{ email_verifications : "verifies"
+    users ||--o{ user_status_changes : "status history (subject)"
+    users |o--o{ user_status_changes : "actor (admin)"
+    refresh_tokens |o--o| refresh_tokens : "replaced_by"
+    service_clients ||..o{ user_status_changes : "actor_service = client_id (logical)"
+
+    users {
+        bigserial id PK
+        citext email
+        varchar phone
+        varchar password_hash
+        varchar full_name
+        varchar avatar_url
+        varchar role
+        varchar status
+        timestamptz email_verified_at
+        varchar timezone
+        varchar locale
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz deleted_at
+    }
+    refresh_tokens {
+        bigserial id PK
+        bigint user_id FK
+        uuid family_id
+        char token_hash
+        timestamptz expires_at
+        timestamptz revoked_at
+        varchar revoked_reason
+        bigint replaced_by_id FK
+        varchar device_info
+        timestamptz created_at
+    }
+    password_resets {
+        bigserial id PK
+        bigint user_id FK
+        char token_hash
+        timestamptz expires_at
+        timestamptz used_at
+        timestamptz invalidated_at
+        timestamptz created_at
+    }
+    email_verifications {
+        bigserial id PK
+        bigint user_id FK
+        char token_hash
+        timestamptz expires_at
+        timestamptz verified_at
+        timestamptz invalidated_at
+        timestamptz created_at
+    }
+    service_clients {
+        bigserial id PK
+        varchar client_id
+        varchar name
+        varchar client_secret_hash
+        text_array allowed_scopes
+        text_array allowed_audiences
+        boolean is_active
+        timestamptz secret_rotated_at
+        timestamptz last_used_at
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz deleted_at
+    }
+    user_status_changes {
+        bigserial id PK
+        bigint user_id FK
+        varchar from_status
+        varchar to_status
+        bigint actor_user_id FK
+        varchar actor_service
+        varchar reason
+        uuid request_id
+        timestamptz created_at
+    }
+```
+
+---
+
+## `users`
+The account. Single writer: identity-service.
+
+| Column | Type | Null | Constraint / notes |
+|---|---|---|---|
+| `id` | `BIGSERIAL` | no | `PRIMARY KEY`; exposed as numeric id (hub ADR 0004) |
+| `email` | `CITEXT` | no | unique among live rows (`uq_users_email`); never changed in MVP |
+| `phone` | `VARCHAR(16)` | yes | E.164; `chk_users_phone_e164` (`phone ~ '^\+[1-9][0-9]{7,14}$'`) |
+| `password_hash` | `VARCHAR(255)` | no | argon2id encoded string (legacy `$2b$` bcrypt accepted until rehash) |
+| `full_name` | `VARCHAR(120)` | no | `chk_users_full_name_not_blank` (`length(btrim(full_name)) > 0`) |
+| `avatar_url` | `VARCHAR(2048)` | yes | |
+| `role` | `VARCHAR(16)` | no | `chk_users_role` `IN ('patient','doctor','admin')`; no default |
+| `status` | `VARCHAR(16)` | no | `chk_users_status` `IN ('pending','active','suspended','rejected')`; no default |
+| `email_verified_at` | `TIMESTAMPTZ` | yes | set once; drives the `ev` claim |
+| `timezone` | `VARCHAR(64)` | no | IANA zone, validated in the DTO |
+| `locale` | `VARCHAR(35)` | no | BCP-47 tag, validated in the DTO |
+| `created_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
+| `updated_at` | `TIMESTAMPTZ` | no | `DEFAULT now()`; set by the repository on every update |
+| `deleted_at` | `TIMESTAMPTZ` | yes | soft delete; frees the email for re-registration |
+
+| Index | Definition | Query it serves |
+|---|---|---|
+| `uq_users_email` | `UNIQUE (email) WHERE deleted_at IS NULL` | login / register / forgot-password / resend-verification lookup `WHERE email = $1 AND deleted_at IS NULL`; admin `GET /api/users?email=` |
+| `idx_users_created_at_id` | `(created_at DESC, id DESC) WHERE deleted_at IS NULL` | `GET /api/users` default keyset page with no filters |
+| `idx_users_role_created_at_id` | `(role, created_at DESC, id DESC) WHERE deleted_at IS NULL` | `GET /api/users?role=` keyset page |
+| `idx_users_status_created_at_id` | `(status, created_at DESC, id DESC) WHERE deleted_at IS NULL` | `GET /api/users?status=` keyset page (e.g. admin reviewing `suspended`) |
+
+Lookups by id (`GET /api/users/{id}`, `/internal/users?ids=` via `WHERE id = ANY($1) AND deleted_at IS NULL`)
+use the primary key; no extra index.
+
+## `refresh_tokens`
+One row per issued refresh token. A **family** is the chain of rotations started by one login.
+
+| Column | Type | Null | Constraint / notes |
+|---|---|---|---|
+| `id` | `BIGSERIAL` | no | `PRIMARY KEY` |
+| `user_id` | `BIGINT` | no | `fk_refresh_tokens_user_id` → `users(id)` |
+| `family_id` | `UUID` | no | generated at login; shared by every rotation |
+| `token_hash` | `CHAR(64)` | no | sha256 hex of the 256-bit opaque token; `uq_refresh_tokens_token_hash` |
+| `expires_at` | `TIMESTAMPTZ` | no | issue time + `REFRESH_TOKEN_TTL_DAYS` |
+| `revoked_at` | `TIMESTAMPTZ` | yes | |
+| `revoked_reason` | `VARCHAR(32)` | yes | `chk_refresh_tokens_revoked_reason` `IN ('rotated','reuse_detected','logout','password_changed','password_reset','status_changed','admin_revoked','account_deleted')`; `chk_refresh_tokens_revoked_pair` (`(revoked_at IS NULL) = (revoked_reason IS NULL)`) |
+| `replaced_by_id` | `BIGINT` | yes | `fk_refresh_tokens_replaced_by_id` → `refresh_tokens(id)`; set when `revoked_reason='rotated'` |
+| `device_info` | `VARCHAR(255)` | yes | truncated User-Agent; never an IP or PII beyond this |
+| `created_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
+
+| Index | Definition | Query it serves |
+|---|---|---|
+| `uq_refresh_tokens_token_hash` | `UNIQUE (token_hash)` | refresh/logout lookup `WHERE token_hash = $1` (includes revoked rows so reuse is detectable) |
+| `idx_refresh_tokens_user_id_live` | `(user_id, created_at DESC) WHERE revoked_at IS NULL` | revoke all families for a user (suspension, reset, admin `DELETE /sessions`) `UPDATE … WHERE user_id = $1 AND revoked_at IS NULL`; `GET /api/users/{id}/sessions` |
+| `idx_refresh_tokens_family_id_live` | `(family_id) WHERE revoked_at IS NULL` | revoke a family (logout, reuse detection) `UPDATE … WHERE family_id = $1 AND revoked_at IS NULL` |
+| `idx_refresh_tokens_replaced_by_id` | `(replaced_by_id) WHERE replaced_by_id IS NOT NULL` | covers `fk_refresh_tokens_replaced_by_id` |
+| `idx_refresh_tokens_expires_at` | `(expires_at)` | background purge of rows expired beyond retention `WHERE expires_at < $1` |
+
+`idx_refresh_tokens_user_id_live` has `user_id` as leading column; a full FK-covering index is
+`idx_refresh_tokens_user_id` `(user_id)` (needed because the partial index does not cover revoked rows
+for `ON DELETE` checks and account-deletion revocation audits).
+
+## `password_resets`
+| Column | Type | Null | Constraint / notes |
+|---|---|---|---|
+| `id` | `BIGSERIAL` | no | `PRIMARY KEY` |
+| `user_id` | `BIGINT` | no | `fk_password_resets_user_id` → `users(id)` |
+| `token_hash` | `CHAR(64)` | no | sha256 hex; `uq_password_resets_token_hash` |
+| `expires_at` | `TIMESTAMPTZ` | no | issue time + 30 min |
+| `used_at` | `TIMESTAMPTZ` | yes | single use |
+| `invalidated_at` | `TIMESTAMPTZ` | yes | set when a newer reset token is issued |
+| `created_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
+
+| Index | Definition | Query it serves |
+|---|---|---|
+| `uq_password_resets_token_hash` | `UNIQUE (token_hash)` | `POST /api/auth/reset-password` lookup `WHERE token_hash = $1` |
+| `idx_password_resets_user_id_open` | `(user_id) WHERE used_at IS NULL AND invalidated_at IS NULL` | invalidate earlier unused tokens on `forgot-password`; covers the FK |
+| `idx_password_resets_expires_at` | `(expires_at)` | background purge |
+
+## `email_verifications`
+| Column | Type | Null | Constraint / notes |
+|---|---|---|---|
+| `id` | `BIGSERIAL` | no | `PRIMARY KEY` |
+| `user_id` | `BIGINT` | no | `fk_email_verifications_user_id` → `users(id)` |
+| `token_hash` | `CHAR(64)` | no | sha256 hex; `uq_email_verifications_token_hash` |
+| `expires_at` | `TIMESTAMPTZ` | no | issue time + 24 h |
+| `verified_at` | `TIMESTAMPTZ` | yes | single use |
+| `invalidated_at` | `TIMESTAMPTZ` | yes | set when a newer verification token is issued |
+| `created_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
+
+| Index | Definition | Query it serves |
+|---|---|---|
+| `uq_email_verifications_token_hash` | `UNIQUE (token_hash)` | `POST /api/auth/verify-email` lookup `WHERE token_hash = $1` |
+| `idx_email_verifications_user_id_open` | `(user_id) WHERE verified_at IS NULL AND invalidated_at IS NULL` | invalidate earlier unused tokens on register / `resend-verification`; covers the FK |
+| `idx_email_verifications_expires_at` | `(expires_at)` | background purge |
+
+The FK-covering rule is satisfied for the two one-time-token tables by an additional plain
+`idx_<table>_user_id (user_id)` index, because the partial index excludes used rows.
+
+## `service_clients`
+Registered callers of `/internal/*`. Provisioned by an ops procedure, never via an API.
+
+| Column | Type | Null | Constraint / notes |
+|---|---|---|---|
+| `id` | `BIGSERIAL` | no | `PRIMARY KEY` |
+| `client_id` | `VARCHAR(64)` | no | e.g. `care-service`; `chk_service_clients_client_id` (`client_id ~ '^[a-z][a-z0-9-]{2,63}$'`); unique among live rows |
+| `name` | `VARCHAR(120)` | no | human label |
+| `client_secret_hash` | `VARCHAR(255)` | no | argon2id; plaintext shown once at provisioning |
+| `allowed_scopes` | `TEXT[]` | no | `chk_service_clients_allowed_scopes` (`allowed_scopes <@ ARRAY['users:read','users:status:write','doctors:read']::text[]`) |
+| `allowed_audiences` | `TEXT[]` | no | e.g. `{vcare-identity,vcare-care}` |
+| `is_active` | `BOOLEAN` | no | disabled clients get `401 InvalidCredentials` |
+| `secret_rotated_at` | `TIMESTAMPTZ` | yes | |
+| `last_used_at` | `TIMESTAMPTZ` | yes | updated at most once per minute per client (outside the hot path budget) |
+| `created_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
+| `updated_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
+| `deleted_at` | `TIMESTAMPTZ` | yes | soft delete |
+
+| Index | Definition | Query it serves |
+|---|---|---|
+| `uq_service_clients_client_id` | `UNIQUE (client_id) WHERE deleted_at IS NULL` | `POST /internal/auth/token` lookup `WHERE client_id = $1 AND deleted_at IS NULL` |
+
+During secret rotation a client may hold two valid hashes; see
+[service-auth.md](./service-auth.md) — the second hash is `previous_secret_hash VARCHAR(255) NULL` with
+`previous_secret_expires_at TIMESTAMPTZ NULL`, both cleared when the overlap ends.
+
+## `user_status_changes`
+Append-only history of every change to `users.status`, written **in the same transaction** as the change.
+Satisfies PRD §7.12 audit for account status on the Identity side.
+
+| Column | Type | Null | Constraint / notes |
+|---|---|---|---|
+| `id` | `BIGSERIAL` | no | `PRIMARY KEY` |
+| `user_id` | `BIGINT` | no | `fk_user_status_changes_user_id` → `users(id)` |
+| `from_status` | `VARCHAR(16)` | no | `chk_user_status_changes_from_status` (same set as `users.status`) |
+| `to_status` | `VARCHAR(16)` | no | `chk_user_status_changes_to_status`; `chk_user_status_changes_differs` (`from_status <> to_status` — idempotent no-ops write no row) |
+| `actor_user_id` | `BIGINT` | yes | `fk_user_status_changes_actor_user_id` → `users(id)`; the admin (from the token on the public route, from the body on the internal route — recorded as data only) |
+| `actor_service` | `VARCHAR(64)` | yes | service token `sub` (e.g. `care-service`); null for public admin changes |
+| `reason` | `VARCHAR(500)` | no | |
+| `request_id` | `UUID` | no | the `X-Request-Id`, so one trace spans Care and Identity |
+| `created_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
+
+`chk_user_status_changes_actor` requires `actor_user_id IS NOT NULL OR actor_service IS NOT NULL`.
+Registration's initial status is not a change and writes no row.
+
+| Index | Definition | Query it serves |
+|---|---|---|
+| `idx_user_status_changes_user_id_created_at` | `(user_id, created_at DESC)` | status history for a user (admin/support investigation); covers the FK |
+| `idx_user_status_changes_actor_user_id` | `(actor_user_id) WHERE actor_user_id IS NOT NULL` | covers `fk_user_status_changes_actor_user_id`; "what did this admin change" audit |
+
+---
+
+## Redis keys (non-durable)
+| Key | TTL | Purpose |
+|---|---|---|
+| `idem:{route}:{principal-or-ip}:{key}` | 24 h | idempotency record: body hash, status, response body |
+| `rl:{limiter}:{subject}` | window length | sliding-window counters (see [infrastructure.md](./infrastructure.md)) |
+
+## Retention
+Expired or revoked `refresh_tokens`, used/expired one-time tokens are purged by a scheduled job after
+a 30-day retention window (never in a request). `user_status_changes` is retained for the life of the
+account and beyond soft delete.

@@ -58,4 +58,5 @@ add a row here for each module when it is started.
 
 ---
 _Cross-service questions (who calls us, Care's contract, data ownership, glossary, PRD) → the hub:
-`../vcare-hub/INDEX.md`. Do not clone another service just to read its docs._
+`../vcare-hub/INDEX.md` (on GitHub: [OmarRedaX/Vcare](https://github.com/OmarRedaX/Vcare/blob/main/INDEX.md)).
+Do not clone another service just to read its docs._

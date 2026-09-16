@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: explanation
-last_verified: 2026-09-14
+last_verified: 2026-09-15
 tags: [architecture, overview, layering, middleware]
-related: [system-design, data-model, api, auth-tokens, service-auth, infrastructure]
+related: [system-design, data-model, api, auth-tokens, service-auth, infrastructure, deployment, design-baseline]
 ---
 
 # Architecture Overview
@@ -56,8 +56,12 @@ One Node.js process (horizontally scalable, stateless) exposes **two HTTP listen
 | Public listener | end-user and admin API, JWKS, public health | behind ingress with TLS; CORS allowlist; `Cache-Control: no-store` on `/api/auth/*` |
 | Internal listener | service-to-service API | binds to the private interface; ingress never routes `/internal`; a public router never imports an internal controller |
 | PostgreSQL | all durable identity state | Identity is the single writer; no other service connects to it |
-| Redis | sliding-window rate limits, idempotency records (24 h) | not a source of truth; see [infrastructure.md](./infrastructure.md) for failure behaviour |
-| Email port | verification and password-reset emails | `lib/email` port + provider adapter; sends are queued and never block or fail a request |
+| Redis | sliding-window rate limits, idempotency records (24 h) | not a source of truth; **Tier 2** — its loss degrades limits, never availability (ADR 0008) |
+| Worker (`identity-worker`) | outbox email delivery and scheduled purges | same image, `src/worker.ts`, separate deployment; claims `outbox_jobs` with `SKIP LOCKED` (ADR 0007) |
+| Email port | registration codes, account-exists notices, password-reset emails | `lib/email` port + provider adapter; used **only by the worker**; never blocks or fails a request |
+
+Identity's runtime components, scaling, and SLOs: [deployment.md](./deployment.md). Where Identity sits in the
+platform (C4 views, edge, private network, other services): hub `architecture/overview.md` and `deployment.md`.
 
 Signing keys are loaded from the `JWT_PRIVATE_KEYS` secret at boot; token verification is local
 (no database hit) — see [auth-tokens.md](./auth-tokens.md).
@@ -69,7 +73,8 @@ bounded contexts under `src/app/<module>/`:
 
 | Module | Listener | Owns | Tables written |
 |---|---|---|---|
-| `auth` | public | register, login, refresh, logout, verify-email, resend-verification, forgot/reset/change password, `GET/PATCH /api/auth/me` | `users` (create, profile fields, password), `refresh_tokens`, `email_verifications`, `password_resets` |
+| `auth` | public | register start/complete, login, refresh, logout, forgot/reset/change password, `GET/PATCH /api/auth/me` (baseline 2026-09-15; the current contract still has register, verify-email, resend-verification) | `users` (create, profile fields, password), `refresh_tokens`, `registration_challenges`, `password_resets`, `outbox_jobs` (insert) |
+| `outbox` | worker | claim, send, retry, dead-letter jobs; scheduled purges | `outbox_jobs`, hash/expiry columns of `registration_challenges` and `password_resets` |
 | `users` | public | admin listing/lookup, admin status change, status history writes | `users.status`, `user_status_changes` |
 | `sessions` | public | session listing and revocation by family; revocation primitives used by `auth` and `users` | `refresh_tokens` (revoke) |
 | `internal-users` | internal | batch summary lookup, Care-driven status change | via `users` and `sessions` services |

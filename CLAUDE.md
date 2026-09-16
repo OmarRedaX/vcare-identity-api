@@ -5,7 +5,7 @@ baseline for the vcare platform, made stricter than the reference `playground-wi
 is **self-contained** — you do not need another repo's CLAUDE.md to follow it.
 
 - **Source of intent:** the PRD at `../vcare-hub/product/prd.md`. **Source of truth for the API:** `contracts/openapi.yaml`.
-- **Cross-service context:** the hub at `../vcare-hub` (start at its `INDEX.md`).
+- **Cross-service context:** the hub at `../vcare-hub` (start at its `INDEX.md`). Platform-scope docs — overview, deployment topology, capacity model, integration cases, data ownership — live **only** there; see "Doc placement — hub or service".
 - **Citing this file:** always cite sections **by name** (e.g. "CLAUDE.md → Security rules"), never by number.
 - **Architect trigger:** when the user says **"let's system design"** (or runs `/system-design <topic>`), run the `/system-design` command inline — see "Architect mode — /system-design".
 
@@ -25,7 +25,7 @@ Identity owns **who someone is and whether they may act**. Nothing else.
 |---|---|
 | Accounts (`users`): email, phone, password hash, full name, avatar, role, status, timezone, locale | Doctor profiles, credentials, verification documents (Care) |
 | Authentication: login, logout, access tokens, rotating refresh tokens, sessions | Consultations, schedules, medical records (Care) |
-| Email verification, password reset, password change | The *decision* to approve/reject/suspend a doctor (Care decides; Identity applies the account state) |
+| Email ownership proof at registration (6-digit code, ADR 0006), password reset, password change | The *decision* to approve/reject/suspend a doctor (Care decides; Identity applies the account state) |
 | Account status: `pending`, `active`, `suspended`, `rejected` | Any clinical data, ever |
 | Service clients and service tokens for service-to-service auth | |
 | Account status history (who changed a status, when, why, from which service) | |
@@ -34,7 +34,9 @@ Identity is the **shared foundation**: Care, and the Phase-2 AI service, authent
 touching its database. Identity is **Tier 1** — if it is down, nobody can log in — so its hot paths
 (login, refresh, JWKS, `/internal/users`) must be small, fast, and dependency-light.
 
-Roles: `patient`, `doctor`, `admin`. Admins are provisioned by a seed/ops procedure, never by public registration.
+Roles: `patient`, `doctor`, `admin`. Admins are never created by public registration: in MVP ops inserts the row
+manually (`role='admin'`, unusable argon2id hash) and the admin sets their password through forgot/reset password
+(ADR 0010; runbook → Create an admin account). A provisioning CLI and admin MFA are deferred.
 
 ---
 
@@ -69,6 +71,9 @@ src/
   app.ts                     # public express app (mounted under /api)
   internal-app.ts            # internal express app (mounted under /internal) — separate listener
   server.ts                  # bootstrap both listeners + graceful shutdown
+  worker.ts                  # outbox worker entrypoint (email delivery, purges) — separate deployment (ADR 0007)
+  bootstrap.ts               # DI registration (the only place that wires app/ into the container)
+  migrate.ts                 # migration CLI (latest / rollback / status / make)
   routes.ts                  # mounts public module routers
   internal-routes.ts         # mounts internal module routers
   app/<module>/              # one folder per bounded context (auth, users, sessions, internal-users, service-auth, ...)
@@ -86,13 +91,16 @@ src/
     config/      # env.ts (zod)
     di/          # container.ts, tokens.ts
     error/       # AppError.ts, errorHandler.ts (the one error envelope)
-    http/        # response.ts, pagination/
+    http/        # response.ts, pagination/, cors.ts, no-store.ts, client-ip.ts
+    lifecycle/   # shutdown/readiness state, in-flight request counter
+    worker/      # loop runner for the worker (stop after the current tick)
     idempotency/ # Redis-backed idempotency middleware
     rate-limit/  # Redis sliding-window limiter
     knex/        # knex.ts, knexfile.ts
     redis/       # connection + health
     logger/      # logger.ts (redaction built in)
-    email/       # email port + provider adapter (async, never blocks a request)
+    email/       # email port + provider adapter (used only by the worker; never blocks a request)
+    outbox/      # enqueue (inside the caller's transaction), claim with SKIP LOCKED, retry/dead-letter
     types/       # express.d.ts (req.auth, req.requestId)
     validation/  # validateBody / validateQuery
   pkg/
@@ -156,7 +164,7 @@ Every module under `src/app/<module>/` has the same skeleton.
 - **`TIMESTAMPTZ` everywhere**, stored in UTC (`SET TIME ZONE 'UTC'` on every pool connection). `TIMESTAMP` without time zone is forbidden.
 - **Soft delete only:** `deleted_at TIMESTAMPTZ NULL`. No `DELETE` statement against business tables in application code; hard delete is never exposed. Uniqueness is enforced among live rows with partial unique indexes (`WHERE deleted_at IS NULL`).
 - **Email** is `CITEXT` with `uq_users_email` partial unique index on live rows.
-- **Secrets are never stored in plaintext:** `password_hash` (argon2id), `refresh_tokens.token_hash` (sha256 of a 256-bit random token), `password_resets.token_hash`, `email_verifications.token_hash`, `service_clients.client_secret_hash` (argon2id).
+- **Secrets are never stored in plaintext:** `password_hash` (argon2id), `refresh_tokens.token_hash` (sha256 of a 256-bit random token), `password_resets.token_hash`, `registration_challenges.code_hash` (HMAC-SHA256 with `OTP_PEPPER`), `service_clients.client_secret_hash` (argon2id). One-time secrets are generated by the worker at send time; `outbox_jobs` rows hold ids only — never PII or secrets.
 - **Enum-like columns:** `VARCHAR(n) NOT NULL CHECK (col IN (...))`, never native `ENUM`.
 - **Every FK** is named and covered by an index whose leading column is the FK column.
 - **Indexes exist only for a query in code**, each with a comment naming that query. Composite order: equality columns, then range/sort column.
@@ -166,13 +174,14 @@ Every module under `src/app/<module>/` has the same skeleton.
 
 Expected tables (created by modules as they are built, not before): `users`, `refresh_tokens`
 (`user_id, family_id, token_hash, expires_at, revoked_at, revoked_reason, replaced_by_id, device_info`),
-`password_resets`, `email_verifications`, `service_clients`, `user_status_changes`.
+`password_resets`, `registration_challenges`, `outbox_jobs`, `service_clients`, `user_status_changes`
+(definitions: `docs/architecture/data-model.md`).
 
 ---
 
 ## API conventions
 
-**Base paths:** public `/api/*` on `PORT` (local `3000`); internal `/internal/*` on `INTERNAL_PORT` (local `3100`); `GET /api/health`, `GET /internal/health`; `GET /.well-known/jwks.json` (public listener). Care runs locally on `3001` / `3101`.
+**Base paths:** public `/api/*` on `PORT` (local `3000`); internal `/internal/*` on `INTERNAL_PORT` (local `3100`); `GET /api/health/live|ready`, `GET /internal/health/live|ready` (readiness fatal on Postgres only, ADR 0014; never routed by the edge); `GET /.well-known/jwks.json` (public listener). Production is a single public origin with edge path routing (hub ADR 0005). Care runs locally on `3001` / `3101`.
 
 **One error envelope** — identical in both vcare services, produced only by `lib/error/errorHandler.ts`:
 ```json
@@ -185,7 +194,7 @@ Unknown errors become `InternalError` (500) with no stack or internals in the bo
 
 **Pagination:** every list is **cursor-based keyset** — `?cursor=<opaque>&limit=<1..100, default 20>`; the cursor encodes `(sortValue, id)` so ties are stable. Response `meta: { nextCursor, hasMore, count }`. Fetch `limit + 1`. Lists are filterable via whitelisted query params only.
 
-**Idempotency:** `Idempotency-Key` (UUID) is **required** on `POST /api/auth/register` and optional on other POSTs. Stored in Redis for 24 h keyed by `(route, principal-or-ip, key)` with a hash of the request body; same key + different body → `422 IdempotencyConflict`; same key + same body → replay the original status and body.
+**Idempotency:** `Idempotency-Key` (UUID) is **required** on `POST /api/auth/register/complete` and optional on other POSTs. When Redis is unavailable the middleware is skipped and database constraints stop duplicates (ADR 0008). Stored in Redis for 24 h keyed by `(route, principal-or-ip, key)` with a hash of the request body; same key + different body → `422 IdempotencyConflict`; same key + same body → replay the original status and body.
 
 **Status codes:** 200 read/update · 201 create · 204 no body · 400 `ValidationFailed` · 401 `Unauthorized`/`TokenExpired`/`InvalidCredentials` · 403 `Forbidden`/account-state errors · 404 `NotFound` · 409 `Conflict` · 422 `IdempotencyConflict` · 429 `RateLimited` · 500 `InternalError` · 503 dependency down (health only).
 
@@ -202,7 +211,7 @@ Unknown errors become `InternalError` (500) with no stack or internals in the bo
 | `EmailNotVerified` | 403 | action requires a verified email |
 | `AccountPending` | 403 | doctor account awaiting verification tried a doctor-only action |
 | `AccountSuspended` | 403 | suspended account |
-| `AccountRejected` | 403 | rejected account |
+| `AccountRejected` | 403 | reserved — not returned by Identity (rejected accounts can sign in, ADR 0004) |
 | `Forbidden` | 403 | role or ownership check failed |
 | `ServiceTokenRequired` | 401 | `/internal/*` called without a valid service token (incl. with a user token) |
 | `InsufficientScope` | 403 | service token lacks the required scope |
@@ -225,7 +234,8 @@ Unknown errors become `InternalError` (500) with no stack or internals in the bo
 `vcare_rt; HttpOnly; Secure; SameSite=Strict; Path=/api/auth; Max-Age=<ttl>` (path covers `/refresh` and `/logout`).
 - **Rotate on every use:** `/api/auth/refresh` revokes the presented token (`revoked_reason='rotated'`, `replaced_by_id`) and issues a new one in the same family, in one transaction.
 - **Reuse detection:** presenting an already-rotated token revokes the **entire family** (`revoked_reason='reuse_detected'`) and returns `401 RefreshTokenReused`.
-- Refresh re-reads the user: `suspended`/`rejected` → revoke family, `403 AccountSuspended`/`AccountRejected`.
+- **Grace window (ADR 0005):** if the presented token was rotated less than `REFRESH_REUSE_GRACE_SECONDS` (10 s) ago and its successor is still live, return `401 RefreshTokenInvalid` **without** revoking the family and **without** a clearing `Set-Cookie`.
+- Refresh re-reads the user: `suspended` → revoke family, `403 AccountSuspended`. `rejected` (and `pending`) may refresh.
 - Logout revokes the presented token's family and clears the cookie. `DELETE /api/users/:id/sessions` (admin) revokes all of a user's families.
 - **Password change or reset revokes all other refresh tokens.**
 
@@ -242,6 +252,9 @@ Unknown errors become `InternalError` (500) with no stack or internals in the bo
 ## Authorization — RBAC and ownership
 
 **Deny by default.** `authorize(policy)` runs on every route; a route with no policy fails closed (500 at boot in dev, review blocker always). A policy declares **roles** and an **ownership predicate**; both must pass. Use the `rbac-ownership-guard` skill.
+Authentication and authorization stay separate: `user-guard` / `service-guard` only verify the token and set
+`req.auth`; `authorize(policy)` only decides access. Policies list roles **explicitly** — there is no "any
+authenticated user" wildcard, so a new role gets no access until policies name it (ADR 0010).
 
 ```ts
 // app/users/policies.ts
@@ -251,11 +264,11 @@ export const getMePolicy: Policy = { roles: ["patient", "doctor", "admin"], owne
 
 | Route | Roles | Ownership | Account-state requirement |
 |---|---|---|---|
-| `POST /auth/register`, `/auth/login`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/verify-email`, `/auth/resend-verification` | public | — | rate-limited |
+| `POST /auth/register/start`, `/auth/register/complete`, `/auth/login`, `/auth/forgot-password`, `/auth/reset-password` | public | — | rate-limited; login allowed for `pending`, `active`, `rejected` |
 | `POST /auth/refresh`, `/auth/logout` | refresh cookie | token's own family | not suspended/rejected (refresh) |
-| `POST /auth/change-password`, `GET /auth/me`, `PATCH /auth/me` | patient, doctor, admin | self | any non-suspended/rejected |
+| `POST /auth/change-password`, `GET /auth/me`, `PATCH /auth/me` | patient, doctor, admin | self | any non-suspended (`rejected` allowed) |
 | `GET /users`, `GET /users/:id` | admin | none | active |
-| `PATCH /users/:id/status` | admin | none; cannot target self; cannot change another admin | active |
+| `PATCH /users/:id/status` | admin | none; cannot target self, another admin, or a **doctor** (`403 Forbidden`, ADR 0012) — patients only | active |
 | `GET /users/:id/sessions`, `DELETE /users/:id/sessions` | admin | none | active |
 | `GET /internal/users?ids=` | service token | scope `users:read` | — |
 | `PATCH /internal/users/:id/status` | service token | scope `users:status:write` | — |
@@ -269,10 +282,12 @@ A non-owner receives `404 NotFound` where revealing existence would leak data (e
 
 - **Passwords:** argon2id `memoryCost=19456 KiB, timeCost=2, parallelism=1` (tune upward, never down). Legacy bcrypt hashes are verified then rehashed on successful login. Minimum length 10, max 128, checked against a small breached-password denylist. Never log, return, or compare passwords with `===`.
 - **Login:** constant-shape response for unknown email vs wrong password (`InvalidCredentials`); a dummy argon2 verify runs when the email is unknown to equalize timing.
-- **Rate limits (Redis sliding window):** login 5/min per IP+email and 20/min per IP · register 5/h per IP · forgot/resend 3/h per email · reset/verify 10/h per IP · refresh 30/min per family · `/internal/auth/token` 60/min per client.
-- **One-time tokens:** email verification (24 h) and password reset (30 min) are 256-bit random, stored as sha256, single-use (`used_at`/`verified_at`), and invalidate earlier unused tokens of the same kind.
+- **Rate limits (Redis sliding window):** login 5/min per IP+email and 20/min per IP · register/start 3/h per email and 5/h per IP · register/complete 10/h per IP · forgot 3/h per email · reset 10/h per IP · refresh 30/min per family · `/internal/auth/token` 60/min per client. Limiters run before validation and hashing.
+- **Redis down (ADR 0008):** credential-route limiters fall back to an in-process per-task limiter at `max(1, floor(limit / RATE_LIMIT_FALLBACK_DIVISOR))` and alert; refresh fails open; Redis is Tier 2 and never fails readiness.
+- **Hashing load:** argon2 runs behind a bounded semaphore (`HASH_CONCURRENCY`, `HASH_QUEUE_MAX`); a full queue returns `429 RateLimited`, never an unbounded wait.
+- **One-time secrets:** registration code (6 digits, 10 min from send, max 5 attempts, HMAC-SHA256 with `OTP_PEPPER`, single-use `consumed_at`; ADR 0006) and password reset (30 min, 256-bit random, sha256, single-use `used_at`). Both are generated by the worker at send time and invalidate earlier open ones of the same kind. `register/start` always returns `202` (no account enumeration).
 - **Forgot-password** always returns 204 regardless of whether the email exists.
-- **Headers:** `helmet`; CORS allowlist from env (`CORS_ORIGINS`), credentials only for listed origins; `Cache-Control: no-store` on every `/api/auth/*` response.
+- **Headers:** `helmet`; CORS allowlist from env (`CORS_ORIGINS`) in local development only — production is a single origin with CORS disabled (hub ADR 0005); `Cache-Control: no-store` on every `/api/auth/*` response.
 - **Env:** every variable declared in `lib/config/env.ts` (zod) — **no defaults on secrets**; the process refuses to start on invalid env.
 - **Internal listener** binds to the private interface only; ingress never routes `/internal`.
 
@@ -308,29 +323,29 @@ Identity is the **provider** in all three platform integration cases (details: h
 
 **`doctors:read` scope:** Identity issues it, but no MVP service client holds it; it exists for admin tooling and the Phase-2 AI service to call Care's `/internal/doctors/:userId/summary` once such a client is provisioned (hub `TODO.md`).
 
-**Known gap (MVP, HTTP-only, no events):** if an admin changes a **doctor's** status directly via Identity's `PATCH /api/users/:id/status`, Care is not notified. Two mitigations apply together until an event or a design decision closes this: (1) the admin console routes doctor suspension through Care (`PATCH /admin/doctors/:id/suspend`), and (2) Care reads `status` from batch hydration and hides non-active doctors from search when that data is fresh. Reinstating a suspended doctor is an Identity-only admin action in MVP and is **not** reflected in Care (out of scope; see "Out of scope"). This is the first candidate topic for `/system-design`.
+**Doctor account status — Care is the only initiator (ADR 0012, hub ADR 0006):** `PATCH /api/users/:id/status` refuses doctor targets with `403 Forbidden`, so every doctor status change arrives through `PATCH /internal/users/:id/status` from Care and Care's state always moves with it. Reinstating a suspended doctor has no API path in MVP (ops incident procedure in both services; see "Out of scope").
 
 ---
 
 ## Domain rules
 
-1. **Registration:** `role ∈ {patient, doctor}` only. Patients start `status=active` with `email_verified_at=NULL`; doctors start `status=pending`. A verification email is queued asynchronously; email delivery failure never fails registration.
-2. **Email verification** sets `email_verified_at` once; re-verifying is a no-op 204. Care relies on the `ev` claim for "patients must have a verified email before booking".
+1. **Registration (ADR 0006):** email-first. `register/start` always returns `202` and queues a code (unknown email) or an "account exists" notice (known email). `register/complete` with a valid code creates the account with `email_verified_at=now()`; `role ∈ {patient, doctor}` only; patients start `status=active`, doctors `status=pending`. Email delivery runs through the outbox and never fails a request.
+2. **Email verification** is proven before the account exists; there is no verify-email or resend flow. The `ev` claim stays (always `true` for such accounts) because Care relies on it for "patients must have a verified email before booking".
 3. **Status transitions** (anything else → `409 InvalidStatusTransition`):
    | From | To | Who |
    |---|---|---|
    | `pending` | `active`, `rejected` | Care (Case 1) |
    | `rejected` | `pending` | Care (Case 1 path, when an application is re-opened or resubmitted) |
-   | `active` | `suspended` | Care (Case 3) or admin |
-   | `suspended` | `active` | admin only (Identity API); not propagated to Care in MVP |
+   | `active` | `suspended` | Care (Case 3) for doctors; admin (Identity API) for patients |
+   | `suspended` | `active` | admin only (Identity API), **patients only** — doctor reinstatement has no API path in MVP |
 
    Setting the status a user already has is a 200 no-op. Every other pair is `409 InvalidStatusTransition`.
 4. **Entering `suspended` or `rejected` revokes all refresh tokens** in the same transaction. Access tokens already issued expire within 15 minutes; the residual window is accepted and documented (ADR 0002). Care additionally blocks suspended doctors locally at once.
-5. `suspended` and `rejected` accounts cannot log in or refresh. `pending` doctors can log in (to complete onboarding in Care) but their token carries `status=pending`.
-6. **Admins cannot change their own status** or another admin's status through the API.
+5. `suspended` accounts cannot log in or refresh. `pending` and `rejected` doctors can log in (to complete onboarding or fix and resubmit in Care); their token carries that status (ADR 0004).
+6. **Admins cannot change their own status**, another admin's status, or a **doctor's** status through the API (doctor status changes only via Care, ADR 0012).
 7. **Password change** requires the current password and revokes all other refresh-token families. **Password reset** revokes all families.
 8. **Email change** is out of scope for MVP (`PATCH /auth/me` rejects `email`).
-9. **Soft delete** of an account sets `deleted_at`, revokes all tokens, and frees the email for re-registration; the row is never hard-deleted.
+9. **Soft delete** of an account sets `deleted_at`, revokes all tokens, and frees the email for re-registration; the row is never hard-deleted. PII is retained on soft delete in MVP (ADR 0011, revisit before GA).
 10. All timestamps UTC; each user has an IANA `timezone` (validated) and `locale` (BCP-47).
 
 ---
@@ -340,7 +355,7 @@ Identity is the **provider** in all three platform integration cases (details: h
 - **Unit tests** (`tests/unit/`): isolate one unit; mock collaborators (repositories, other services, Redis, clock, email port). Infra-failure scenarios (DB down → 503) are unit tests. Fast (< 100 ms each).
 - **Integration tests** (`tests/integration/`): supertest against the **real** app wiring, **real** Postgres, **real** Redis. **Never mock services or repositories.** Mock only system-external dependencies (the email provider). Truncate tables per suite. No infra mocks in `tests/setup.ts`.
 - **Contract conformance:** integration tests assert status codes, error `code`s, and response shapes from `contracts/openapi.yaml`. A mismatch is a failing test, never a doc edit.
-- **Mandatory scenarios:** every rule in "Domain rules" has a named test; every route has RBAC tests (wrong role → denied, non-owner → denied, owner/allowed role → allowed); refresh rotation + reuse detection revokes the family; suspension revokes all sessions and a subsequent refresh fails; user token on `/internal/*` → 401; missing scope → 403; `/internal/users` omits unknown ids and caps at 100; pagination page 2 reachable on the default sort; idempotent replay and conflict; no secret appears in any response body.
+- **Mandatory scenarios:** every rule in "Domain rules" has a named test; every route has RBAC tests (wrong role → denied, non-owner → denied, owner/allowed role → allowed); refresh rotation + reuse detection revokes the family; suspension revokes all sessions and a subsequent refresh fails; user token on `/internal/*` → 401; missing scope → 403; `/internal/users` omits unknown ids and caps at 100; pagination page 2 reachable on the default sort; idempotent replay and conflict; no secret appears in any response body; refresh within the grace window does not revoke the family while a later replay does; `register/start` responds identically for known and unknown emails; a registration code fails after 5 attempts and after expiry; the admin status route refuses a doctor target; login and refresh succeed for a `rejected` account; with Redis down, login still works under the fallback limiter and readiness stays 200; outbox rows never contain PII or secrets.
 - Names: `should <do something> when <condition>`. Do not test the framework.
 
 ---
@@ -399,9 +414,11 @@ Implement one module end-to-end before starting the next (parallel modules only 
 ## Out of scope
 
 - Social login / OAuth providers, SSO, MFA (future ADR)
+- Admin provisioning CLI, invitation links, shorter admin token lifetimes (ADR 0010)
+- PII anonymization and self-service account deletion (ADR 0011)
 - SMS/WhatsApp, phone verification
 - Email change flow
-- Propagating doctor reinstatement (`suspended → active`) to Care
+- Doctor reinstatement (`suspended → active`) — no API path in either service in MVP
 - Payments, and everything in PRD §13
 - Doctor credentials and verification documents (Care owns them)
 - Message bus / events — MVP is HTTP-only; `user.status_changed` and `user.registered` events are future (no AsyncAPI contract yet)
@@ -415,7 +432,7 @@ Feature work runs through slash commands, each backed by a focused subagent. **E
 
 | Command | Does | Runs as |
 |---|---|---|
-| `/system-design <topic>` | interactive architecture dialogue → `docs/system-design.md`, `docs/architecture/*`, `docs/adr/*` (+ hub for cross-service) | inline |
+| `/system-design <topic>` | interactive architecture dialogue → `docs/system-design.md`, `docs/architecture/*`, `docs/adr/*` for service scope; hub docs for platform scope (classified with the `docs-placement` skill) | inline |
 | `/brainstorm <feature>` | interactive intent/scope → `docs/<module>/brainstorm.md` | inline |
 | `/construct-spec <module>` | `docs/<module>/spec.md` (parallel recon when ≥ 2 large sources) | `flow-spec-author` |
 | `/develop <module> [--fix-review]` | spec → `tasks.md` → code, task by task | `flow-developer` |
@@ -442,10 +459,11 @@ Subagents cannot spawn subagents, so **all fan-out is orchestrated by the comman
 Run the `/system-design` command **inline** — never delegate the dialogue or the writing to a subagent.
 
 It works at architecture altitude, like `/brainstorm` one level up:
-1. Read the hub first (`../vcare-hub/INDEX.md` → `architecture/landscape.md`, `architecture/data-ownership.md`, the relevant PRD section, the other service's synced contract), then this repo's `docs/system-design.md`, `docs/architecture/*`, `docs/adr/*`, `contracts/openapi.yaml`.
+1. Read the hub first (`../vcare-hub/INDEX.md` → `architecture/overview.md`, then the platform docs the topic touches — `landscape.md`, `data-ownership.md`, `deployment.md`, `capacity.md` — the relevant PRD section, the other service's synced contract), then this repo's `docs/system-design.md`, `docs/architecture/*`, `docs/adr/*`, `contracts/openapi.yaml`.
 2. Ask **one question at a time**; for each decision propose **2–3 options with trade-offs and a recommendation**; the user decides.
-3. Write the result: `docs/system-design.md` (router), `docs/architecture/<topic>.md` shard(s), `docs/adr/NNNN-<slug>.md` for each decision; flag required contract changes.
-4. **Cross-service topics** also update `../vcare-hub/architecture/landscape.md` and `../vcare-hub/architecture/data-ownership.md` (and a hub ADR when the decision is platform-wide).
+3. **Classify every output by scope** before writing (see "Doc placement — hub or service"; `docs-placement` skill).
+4. Write service-scope results here: `docs/system-design.md` (router), `docs/architecture/<topic>.md` shard(s), `docs/adr/NNNN-<slug>.md` for each decision; flag required contract changes.
+5. Write platform-scope results to the hub: `architecture/overview.md`, `deployment.md`, `capacity.md`, `landscape.md`, `data-ownership.md`, `glossary.md`, hub `adr/` for platform-wide decisions. Split topics (capacity, deployment, availability, observability) → the platform part and this service's roll-up row in the hub, the derivation here.
 
 ---
 
@@ -456,7 +474,8 @@ docs/
   INDEX.md             # router — READ FIRST
   service-card.md      # 30-second summary — synced to ../vcare-hub/catalog/identity-service.card.md
   system-design.md     # architecture ROUTER → architecture/*.md (one doc = one job)
-  architecture/        # overview, data-model, api, auth-tokens, service-auth, infrastructure, future
+  architecture/        # SERVICE SCOPE ONLY: design-baseline, capacity (Identity derivation), deployment (Identity runtime),
+                       # overview, data-model, api, auth-tokens, service-auth, infrastructure, future
   runbook.md           # on-call (how-to lens)
   quickstart.md        # first local run (tutorial lens)
   adr/NNNN-*.md        # append-only decisions
@@ -473,17 +492,47 @@ contracts/
 5. **Service card ↔ hub:** update `docs/service-card.md` when responsibilities, owned data, dependencies, or endpoints change; the hub is populated by `../vcare-hub/scripts/sync-from-spoke.sh` — never hand-copy into the hub.
 6. **Decisions → ADRs** (`docs/adr/NNNN-*.md`), append-only; supersede, never rewrite.
 7. **No per-module folders ahead of time** — `/brainstorm` creates `docs/<module>/` when the module is started.
+8. **Place every doc by scope** (hub ADR 0008): platform-scope content goes to the hub, service-scope content stays here, split topics use the hub roll-up; never `service: platform` in this repo. See "Doc placement — hub or service".
+9. **Keep all three repos in sync in the same session.** Any change that affects identity, care, or the hub updates every affected doc, `CLAUDE.md`, and shared skill in all three. A Stop hook (`.claude/hooks/docs-sync-check.sh`, identical in both spokes) enforces it: hub freshness, retired terms from `.claude/hooks/retired-terms.txt`, and hub card/contract drift. When a decision retires a name, add it to `retired-terms.txt` in both spokes.
+
+---
+
+## Doc placement — hub or service
+
+Every doc and every fact has **one home, decided by scope** — never by the repo you happen to be working in (hub ADR 0008). Step-by-step procedure, placement table, and checklist: the `docs-placement` skill.
+
+**Scope test — "whose code makes this true, and who must agree on it?"**
+
+| If the doc or fact… | Scope | Home |
+|---|---|---|
+| describes the platform as a whole or two or more services: system context and container views, edge routing, network zones, how every service is deployed, the release pipeline, the availability roll-up, shared traffic assumptions, cross-service load, integration cases and failure policies, data ownership, shared terms, platform-wide decisions | **platform** | the hub — `../vcare-hub/architecture/{overview,deployment,capacity,landscape,data-ownership}.md`, `glossary.md`, `adr/`, `product/prd.md` |
+| is made true only by this service's code: module map, layering, request pipeline, data model, API prose, env vars, this service's capacity derivation, runtime components and scaling, bottlenecks, metrics and alerts, runbook, quickstart, service decisions, module docs | **service** | this repo — `docs/` |
+| has both parts (capacity, deployment, availability, observability, data ownership) | **split** | hub: the platform part + one **roll-up** row per service with headline values and a link; here: the derivation, linking to the hub for its inputs |
+
+**When to read the hub**
+- Working on this service's internals (a module, migration, route, test) → read `CLAUDE.md` and `docs/` only.
+- Touching edge routing, networking, deployment, scaling, availability, release, or observability → hub `architecture/deployment.md` first, then the local shard.
+- Sizing anything or changing a load assumption → hub `architecture/capacity.md` first, then `docs/architecture/capacity.md`.
+- Touching a cross-service call, borrowed data, or a shared term → hub `landscape.md`, `data-ownership.md`, `glossary.md`, the other service's synced contract.
+- Orienting on the whole system → hub `INDEX.md` → `architecture/overview.md`.
+
+**When to write where**
+- **Author each number once.** Platform inputs are authored in the hub; values derived from them are authored here. A local doc may quote a hub value only with a link to it — it is never the place to change it.
+- Frontmatter `service: platform` ⇔ the file lives in the hub. Never create a `service: platform` doc here, and never copy a hub doc here; link to it. The Stop hook blocks the first.
+- Only `/system-design` hand-edits hub docs (never the synced `catalog/*.card.md` or `contracts/*`). Every other phase writes this repo's `docs/` and **lists** platform deltas for `/system-design`.
+- Changing a headline the hub rolls up (task counts, DB class, storage, availability target) updates the hub row in the same session.
+- `docs/service-card.md` names hub docs in plain text — the sync rewrites its relative links to point into this repo.
 
 ---
 
 ## Cross-service context (the hub)
 
-This repo knows only itself. For Care's contract, who calls whom, data ownership, glossary terms, or the PRD → the hub at `../vcare-hub`, starting at `INDEX.md`.
+This repo knows only itself. For Care's contract, who calls whom, data ownership, glossary terms, platform deployment or capacity, or the PRD → the hub at `../vcare-hub`, starting at `INDEX.md`.
 
 Retrieval escalates **cheapest first**; stop as soon as you have the answer:
 1. **Local** — grep this repo.
 2. **Hub `INDEX.md`** — find where the answer lives.
-3. **Hub content** — catalog cards, synced contracts, landscape, data-ownership, ADRs, glossary, PRD. Most cross-service answers end here.
+3. **Hub content** — platform overview, deployment topology, capacity model, landscape (integration), data-ownership, catalog cards, synced contracts, ADRs, glossary, PRD. Every platform-scope answer ends here.
 4. **Sibling repo on disk?** If you need detail the hub lacks, check for `../vcare-care-api`. If present, read its docs directly. **If unsure whether it is checked out, ASK the user** before reaching out.
 5. **GitHub MCP peek** — only if not local; read the specific file. Still no clone.
 6. **Clone** — only to actually change or run that service. Never clone just to read docs.

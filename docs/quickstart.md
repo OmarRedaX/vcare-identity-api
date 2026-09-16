@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: tutorial
-last_verified: 2026-09-14
+last_verified: 2026-09-15
 tags: [tutorial, getting-started, local-dev, curl]
-related: [infrastructure, api, auth-tokens]
+related: [infrastructure, api, auth-tokens, design-baseline]
 ---
 
 # Quickstart (tutorial)
@@ -15,6 +15,13 @@ From zero to a logged-in user with a refreshed session, on your machine.
 
 > No application code exists yet. Every command marked `(planned)` shows the intended shape once the
 > modules are built through the workflow. The curl requests follow `contracts/openapi.yaml` exactly.
+
+> **Will change with the 2026-09-15 baseline:** steps 4.1–4.2 become `POST /api/auth/register/start` (read the
+> 6-digit code from the local mail catcher) then `POST /api/auth/register/complete` (account created verified; no
+> verify-email step); health checks become `/api/health/ready` and `/internal/health/ready`; local runs also start
+> the worker (`npm run worker`, planned) so emails are delivered; `.env` gains `OTP_PEPPER`. This tutorial is
+> rewritten by `/update-docs` once the contract changes — see
+> [architecture/design-baseline.md](./architecture/design-baseline.md).
 
 ## 1. Prerequisites
 - Node.js 24 LTS

@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: reference
-last_verified: 2026-09-14
+last_verified: 2026-09-15
 tags: [architecture, data-model, postgresql, schema, indexes]
-related: [system-design, overview, auth-tokens, service-auth, adr-0001-no-orm-knex-raw-sql]
+related: [system-design, overview, auth-tokens, service-auth, adr-0001-no-orm-knex-raw-sql, design-baseline, capacity, adr-0006-email-first-registration-otp, adr-0007-transactional-outbox-worker]
 ---
 
 # Data Model
@@ -14,6 +14,10 @@ related: [system-design, overview, auth-tokens, service-auth, adr-0001-no-orm-kn
 Planned schema for the identity PostgreSQL database. Tables are created **by the module that needs
 them, when it is built** (raw-SQL Knex migrations, `write-migration` skill) — none exist yet. Every rule
 here comes from CLAUDE.md → Database rules; when a migration is written, this page is reconciled with it.
+
+**2026-09-15 baseline** ([design-baseline.md](./design-baseline.md)): `email_verifications` removed
+(ADR 0006); `registration_challenges` and `outbox_jobs` added (ADR 0006, ADR 0007); `password_resets` token
+columns are set by the worker at send time. Sizes: [capacity.md](./capacity.md).
 
 ## Conventions applied to every table
 - PK `id BIGSERIAL`; FK columns `BIGINT`, each FK named `fk_<table>_<col>` and covered by an index whose
@@ -35,7 +39,7 @@ here comes from CLAUDE.md → Database rules; when a migration is written, this 
 erDiagram
     users ||--o{ refresh_tokens : "has sessions"
     users ||--o{ password_resets : "requests"
-    users ||--o{ email_verifications : "verifies"
+    %% registration_challenges (keyed by email) and outbox_jobs (aggregate_id) have no foreign keys
     users ||--o{ user_status_changes : "status history (subject)"
     users |o--o{ user_status_changes : "actor (admin)"
     refresh_tokens |o--o| refresh_tokens : "replaced_by"
@@ -78,14 +82,29 @@ erDiagram
         timestamptz invalidated_at
         timestamptz created_at
     }
-    email_verifications {
+    registration_challenges {
         bigserial id PK
-        bigint user_id FK
-        char token_hash
+        citext email
+        char code_hash
+        smallint attempts
         timestamptz expires_at
-        timestamptz verified_at
+        timestamptz consumed_at
         timestamptz invalidated_at
         timestamptz created_at
+    }
+    outbox_jobs {
+        bigserial id PK
+        varchar type
+        bigint aggregate_id
+        varchar status
+        smallint attempts
+        timestamptz run_after
+        timestamptz locked_until
+        varchar last_error
+        uuid request_id
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz completed_at
     }
     service_clients {
         bigserial id PK
@@ -138,7 +157,7 @@ The account. Single writer: identity-service.
 
 | Index | Definition | Query it serves |
 |---|---|---|
-| `uq_users_email` | `UNIQUE (email) WHERE deleted_at IS NULL` | login / register / forgot-password / resend-verification lookup `WHERE email = $1 AND deleted_at IS NULL`; admin `GET /api/users?email=` |
+| `uq_users_email` | `UNIQUE (email) WHERE deleted_at IS NULL` | login / `register/start` / `register/complete` / forgot-password lookup `WHERE email = $1 AND deleted_at IS NULL`; admin `GET /api/users?email=` |
 | `idx_users_created_at_id` | `(created_at DESC, id DESC) WHERE deleted_at IS NULL` | `GET /api/users` default keyset page with no filters |
 | `idx_users_role_created_at_id` | `(role, created_at DESC, id DESC) WHERE deleted_at IS NULL` | `GET /api/users?role=` keyset page |
 | `idx_users_status_created_at_id` | `(status, created_at DESC, id DESC) WHERE deleted_at IS NULL` | `GET /api/users?status=` keyset page (e.g. admin reviewing `suspended`) |
@@ -179,37 +198,65 @@ for `ON DELETE` checks and account-deletion revocation audits).
 |---|---|---|---|
 | `id` | `BIGSERIAL` | no | `PRIMARY KEY` |
 | `user_id` | `BIGINT` | no | `fk_password_resets_user_id` → `users(id)` |
-| `token_hash` | `CHAR(64)` | no | sha256 hex; `uq_password_resets_token_hash` |
-| `expires_at` | `TIMESTAMPTZ` | no | issue time + 30 min |
+| `token_hash` | `CHAR(64)` | yes | sha256 hex; **NULL until the worker sends the email** (ADR 0007); `uq_password_resets_token_hash`; `chk_password_resets_token_sent` (`(token_hash IS NULL) = (expires_at IS NULL)`) |
+| `expires_at` | `TIMESTAMPTZ` | yes | send time + 30 min (set by the worker with `token_hash`) |
 | `used_at` | `TIMESTAMPTZ` | yes | single use |
 | `invalidated_at` | `TIMESTAMPTZ` | yes | set when a newer reset token is issued |
 | `created_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
 
 | Index | Definition | Query it serves |
 |---|---|---|
-| `uq_password_resets_token_hash` | `UNIQUE (token_hash)` | `POST /api/auth/reset-password` lookup `WHERE token_hash = $1` |
+| `uq_password_resets_token_hash` | `UNIQUE (token_hash) WHERE token_hash IS NOT NULL` | `POST /api/auth/reset-password` lookup `WHERE token_hash = $1` |
 | `idx_password_resets_user_id_open` | `(user_id) WHERE used_at IS NULL AND invalidated_at IS NULL` | invalidate earlier unused tokens on `forgot-password`; covers the FK |
 | `idx_password_resets_expires_at` | `(expires_at)` | background purge |
 
-## `email_verifications`
+The FK-covering rule is satisfied for `password_resets` by an additional plain
+`idx_password_resets_user_id (user_id)` index, because the partial index excludes used rows.
+
+## `registration_challenges`
+Proof of email ownership before an account exists (ADR 0006). Replaces `email_verifications`.
+
 | Column | Type | Null | Constraint / notes |
 |---|---|---|---|
 | `id` | `BIGSERIAL` | no | `PRIMARY KEY` |
-| `user_id` | `BIGINT` | no | `fk_email_verifications_user_id` → `users(id)` |
-| `token_hash` | `CHAR(64)` | no | sha256 hex; `uq_email_verifications_token_hash` |
-| `expires_at` | `TIMESTAMPTZ` | no | issue time + 24 h |
-| `verified_at` | `TIMESTAMPTZ` | yes | single use |
-| `invalidated_at` | `TIMESTAMPTZ` | yes | set when a newer verification token is issued |
+| `email` | `CITEXT` | no | no FK — the account does not exist yet |
+| `code_hash` | `CHAR(64)` | yes | HMAC-SHA256(`OTP_PEPPER`, 6-digit code), hex; NULL until the worker sends; `chk_registration_challenges_code_sent` (`(code_hash IS NULL) = (expires_at IS NULL)`) |
+| `attempts` | `SMALLINT` | no | `chk_registration_challenges_attempts` (`attempts BETWEEN 0 AND 5`); set explicitly to 0 on insert |
+| `expires_at` | `TIMESTAMPTZ` | yes | send time + 10 min |
+| `consumed_at` | `TIMESTAMPTZ` | yes | set by a successful `register/complete` in the same transaction as the `users` insert |
+| `invalidated_at` | `TIMESTAMPTZ` | yes | set by a newer `register/start` for the same email, or on the 5th failed attempt |
 | `created_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
 
 | Index | Definition | Query it serves |
 |---|---|---|
-| `uq_email_verifications_token_hash` | `UNIQUE (token_hash)` | `POST /api/auth/verify-email` lookup `WHERE token_hash = $1` |
-| `idx_email_verifications_user_id_open` | `(user_id) WHERE verified_at IS NULL AND invalidated_at IS NULL` | invalidate earlier unused tokens on register / `resend-verification`; covers the FK |
-| `idx_email_verifications_expires_at` | `(expires_at)` | background purge |
+| `idx_registration_challenges_email_open` | `(email, created_at DESC) WHERE consumed_at IS NULL AND invalidated_at IS NULL` | `register/complete`: latest open challenge `WHERE email = $1 … ORDER BY created_at DESC LIMIT 1 FOR UPDATE`; `register/start`: invalidate open challenges for the email |
+| `idx_registration_challenges_created_at` | `(created_at)` | worker purge `WHERE created_at < now() - interval '24 hours'` |
 
-The FK-covering rule is satisfied for the two one-time-token tables by an additional plain
-`idx_<table>_user_id (user_id)` index, because the partial index excludes used rows.
+"Account already exists" notices create no challenge row — only an outbox job pointing at the user id.
+
+## `outbox_jobs`
+Transactional outbox processed by `identity-worker` (ADR 0007). Rows hold ids only — **no PII, no secrets**.
+
+| Column | Type | Null | Constraint / notes |
+|---|---|---|---|
+| `id` | `BIGSERIAL` | no | `PRIMARY KEY` |
+| `type` | `VARCHAR(48)` | no | `chk_outbox_jobs_type` `IN ('send_registration_code','send_account_exists_notice','send_password_reset')`; extended by migration for future events |
+| `aggregate_id` | `BIGINT` | no | `registration_challenges.id`, `users.id`, or `password_resets.id` depending on `type` (logical reference, no FK) |
+| `status` | `VARCHAR(16)` | no | `chk_outbox_jobs_status` `IN ('pending','processing','done','dead')`; set explicitly |
+| `attempts` | `SMALLINT` | no | `chk_outbox_jobs_attempts` (`attempts >= 0`); `dead` after `OUTBOX_MAX_ATTEMPTS` |
+| `run_after` | `TIMESTAMPTZ` | no | next eligible attempt (backoff) |
+| `locked_until` | `TIMESTAMPTZ` | yes | lease while `processing`; expired leases are re-claimed |
+| `last_error` | `VARCHAR(500)` | yes | error class/code only — never provider bodies, emails, or secrets |
+| `request_id` | `UUID` | no | originating `X-Request-Id` |
+| `created_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
+| `updated_at` | `TIMESTAMPTZ` | no | `DEFAULT now()`; set on every state change |
+| `completed_at` | `TIMESTAMPTZ` | yes | set when `done` or `dead` |
+
+| Index | Definition | Query it serves |
+|---|---|---|
+| `idx_outbox_jobs_run_after_pending` | `(run_after) WHERE status = 'pending'` | worker claim `WHERE status='pending' AND run_after <= now() ORDER BY run_after LIMIT $n FOR UPDATE SKIP LOCKED` |
+| `idx_outbox_jobs_locked_until_processing` | `(locked_until) WHERE status = 'processing'` | re-claim jobs whose lease expired |
+| `idx_outbox_jobs_completed_at` | `(completed_at) WHERE status IN ('done','dead')` | purge `done` after 7 days and `dead` after 30 days |
 
 ## `service_clients`
 Registered callers of `/internal/*`. Provisioned by an ops procedure, never via an API.
@@ -270,6 +317,13 @@ Registration's initial status is not a change and writes no row.
 | `rl:{limiter}:{subject}` | window length | sliding-window counters (see [infrastructure.md](./infrastructure.md)) |
 
 ## Retention
-Expired or revoked `refresh_tokens`, used/expired one-time tokens are purged by a scheduled job after
-a 30-day retention window (never in a request). `user_status_changes` is retained for the life of the
-account and beyond soft delete.
+All purges run in `identity-worker` under an advisory lock, in batches (never in a request):
+
+| Table | Purged when |
+|---|---|
+| `refresh_tokens` | 30 days after `expires_at` or `revoked_at` |
+| `password_resets` | 30 days after `used_at`, `invalidated_at`, or `expires_at` (unsent rows: 30 days after `created_at`) |
+| `registration_challenges` | 24 h after `created_at` |
+| `outbox_jobs` | `done` 7 days, `dead` 30 days after `completed_at` |
+| `user_status_changes` | never — retained for the life of the account and beyond soft delete |
+| `users` | never hard-deleted; **PII is kept on soft delete in MVP** (ADR 0011) |

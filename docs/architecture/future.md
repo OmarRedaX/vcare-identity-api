@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: explanation
-last_verified: 2026-09-14
+last_verified: 2026-09-15
 tags: [architecture, future, roadmap, events, deferred]
-related: [system-design, service-auth, auth-tokens, api]
+related: [system-design, service-auth, auth-tokens, api, design-baseline, deployment]
 ---
 
 # Deferred Work
@@ -16,18 +16,15 @@ Everything here is **out of scope for MVP** (CLAUDE.md → Out of scope). Each i
 first by rule.
 
 ## 1. Events: `user.registered`, `user.status_changed`
-**Why it matters:** MVP is HTTP-only. When an admin changes a **doctor's** status directly via
-`PATCH /api/users/{id}/status`, care-service is not notified — Care may keep a suspended doctor bookable,
-or never learn that a doctor was reinstated. Two mitigations apply together in MVP:
-1. the admin console routes doctor **suspension** through Care (`PATCH /admin/doctors/:id/suspend`), which
-   calls `PATCH /internal/users/{id}/status` (Case 3);
-2. Care reads `status` from batch hydration (`GET /internal/users?ids=`) and hides non-active doctors from
-   search when that data is fresh.
+**Status (2026-09-15):** the former known gap — an admin changing a **doctor's** status in Identity without
+Care knowing — is **closed by construction**: Identity's admin status route refuses doctor targets and doctor
+status changes only through Care ([ADR 0012](../adr/0012-doctor-status-only-via-care.md), hub ADR 0006).
+Events are still wanted for Care-side reactions to patient status changes, a future `user.registered` consumer,
+and for **doctor reinstatement**, which has no API path in MVP (ops procedure in both services).
 
-**Reinstatement is not propagated (out of scope for MVP).** `suspended → active` is an admin-only action on
-Identity's public API; the internal route rejects it. Care keeps its own suspension flags and upcoming
-consultation follow-ups untouched, so a reinstated doctor stays blocked in Care until an event or a
-Care-side reinstatement flow exists. Closing this is part of the same design topic below.
+**Reinstatement is not propagated (out of scope for MVP).** `suspended → active` for a doctor has no API path;
+the internal route rejects it and the admin route refuses doctor targets. A future design needs a Care-side
+reinstatement flow (Case-3-style failure policy) or a `user.status_changed` consumer.
 
 **Planned events** (also listed under `x-future-events` in the contract):
 
@@ -37,13 +34,13 @@ Care-side reinstatement flow exists. Closing this is part of the same design top
 | `user.status_changed` | any committed change to `users.status` | `userId, fromStatus, toStatus, actorUserId, actorService, reason, requestId, occurredAt` | Care (sync doctor eligibility; flag upcoming consultations on suspension) |
 
 **Design constraints to settle in `/system-design`:**
-- **Transactional outbox:** events are written to an `outbox` table in the same transaction as the status
-  change and history row, then published by a relay — never published directly from the request.
+- **Transactional outbox:** events are written to the existing `outbox_jobs` table (ADR 0007) in the same
+  transaction as the status change and history row, then published by the worker — never directly from the request.
 - At-least-once delivery with an `eventId` for consumer idempotency; ordering per `userId`.
 - An AsyncAPI contract (`contracts/asyncapi.yaml`) becomes a source of truth alongside OpenAPI, and the hub
   syncs it.
-- Options to weigh: outbox + broker (hub decision on the bus), outbox + webhook to Care's internal API, or
-  a design decision that makes Care the only writer of doctor status (removing the admin route for doctors).
+- Options to weigh: outbox + broker, or outbox + webhook to Care's internal API. The choice of bus is a
+  platform decision (hub ADR, tracked in hub `TODO.md` → Events); this repo only documents the events Identity emits.
 - Cross-service: updates hub `architecture/landscape.md`, `data-ownership.md`, and likely a hub ADR.
 
 ## 2. Multi-factor authentication
@@ -75,9 +72,28 @@ No Identity code change is expected — onboarding follows [service-auth.md](./s
 AI booking agent acts **on behalf of a patient**, a delegated-token design (token exchange carrying both
 the patient `sub` and the client `azp`) is a separate `/system-design` topic.
 
-## 6. Smaller deferred items
+## 6. Admin provisioning and hardening
+Deferred by [ADR 0010](../adr/0010-manual-admin-provisioning-role-policies.md); MVP inserts admins manually and
+they set their password through forgot/reset. Future, in priority order:
+1. **Mandatory TOTP MFA for `role=admin`** (see §2) — the first post-MVP security item.
+2. An audited provisioning CLI (private network, one-off task) that creates the admin with an unusable password
+   and queues a set-password invitation through the outbox, writing an audit row with `actor_service='ops-cli'`.
+3. Shorter admin token lifetimes (access 5 min, refresh 12 h), tighter admin login limit, new-device alert.
+
+## 7. PII erasure
+Deferred by [ADR 0011](../adr/0011-pii-retained-on-soft-delete.md) — revisit **before GA** or at the first
+privacy/legal review. Candidate design: ops-initiated soft delete (revoke all tokens) → 30-day grace → worker
+job anonymizes `email` (`deleted-<id>@invalid.vcare`), `phone`/`avatar_url` (`NULL`), `full_name`
+(`Deleted user`), and replaces `password_hash` with an unusable value; the id and `user_status_changes` are kept
+so Care's references stay valid. A self-service `DELETE /api/auth/me` is cross-service (Care must handle the
+patient's upcoming consultations) and needs its own design.
+
+## 8. Smaller deferred items
 - Per-session revoke (`DELETE /api/users/{id}/sessions/{familyId}`) and self-service `GET /api/auth/sessions`.
 - Account soft-delete endpoint (self and admin) — domain rule exists, no route in PRD §14.
 - Breached-password check against a k-anonymity range API instead of a local denylist.
 - Signing keys in a KMS/HSM with remote signing instead of an env secret.
 - Read replica for `GET /api/users` once admin listing load warrants it.
+- Monthly partitioning of `refresh_tokens` at ~10× the capacity baseline ([capacity.md](./capacity.md)).
+- Connection proxy once `identity-api` exceeds ~10 tasks; secondary email provider for outbox failover.
+- OpenTelemetry tracing, adopted jointly with care-service ([ADR 0013](../adr/0013-log-derived-metrics.md)).

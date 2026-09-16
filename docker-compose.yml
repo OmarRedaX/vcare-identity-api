@@ -1,0 +1,72 @@
+# Local development stack (synthetic credentials).
+# care-service uses host ports 5433/6380/3001/3101, so both stacks run side by side.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: identity
+      POSTGRES_PASSWORD: identity
+      POSTGRES_DB: vcare_identity
+    ports:
+      - "5432:5432"
+    volumes:
+      - identity-pg:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U identity -d vcare_identity"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    command: ["node", "dist/migrate.js", "latest"]
+    environment:
+      DATABASE_URL: postgres://identity:identity@postgres:5432/vcare_identity
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    init: true
+    ports:
+      - "3000:3000"
+      - "3100:3100"
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://identity:identity@postgres:5432/vcare_identity
+      REDIS_URL: redis://redis:6379
+      # Container bind so the host port mapping works; production binds the private interface.
+      INTERNAL_HOST: 0.0.0.0
+      CORS_ORIGINS: http://localhost:5173
+      LOG_LEVEL: info
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    init: true
+    command: ["node", "dist/worker.js"]
+    environment:
+      DATABASE_URL: postgres://identity:identity@postgres:5432/vcare_identity
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  identity-pg:

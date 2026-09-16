@@ -4,15 +4,23 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: reference
-last_verified: 2026-09-14
+last_verified: 2026-09-15
 tags: [architecture, api, endpoints, rbac, error-codes]
-related: [system-design, auth-tokens, service-auth, infrastructure]
+related: [system-design, auth-tokens, service-auth, infrastructure, design-baseline]
 ---
 
 # API
 
 This page **derives from [`contracts/openapi.yaml`](../../contracts/openapi.yaml)** — the source of truth.
 If this page and the contract disagree, the contract wins and this page is stale; fix it with `/update-docs`.
+
+> **Pending (approved 2026-09-15, not yet in the contract):** registration becomes `register/start` +
+> `register/complete` and `verify-email` / `resend-verification` are removed (ADR 0006); `rejected` accounts can
+> log in and refresh (ADR 0004); refresh has a 10 s grace window that returns `RefreshTokenInvalid` without
+> revoking the family or clearing the cookie (ADR 0005); `PATCH /api/users/{id}/status` refuses doctor targets
+> (ADR 0012); health splits into `…/health/live` and `…/health/ready` (ADR 0014). Full list:
+> [design-baseline.md](./design-baseline.md) → Required contract changes. This page is updated when the
+> contract changes.
 Per-field request/response schemas are in the contract; this page shows roles, ownership, and errors.
 
 ## Conventions

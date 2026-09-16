@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: explanation
-last_verified: 2026-09-14
+last_verified: 2026-09-15
 tags: [architecture, auth, jwt, jwks, refresh-token, sessions, security]
-related: [system-design, service-auth, data-model, runbook, adr-0002-asymmetric-jwt-rotating-refresh, adr-0003-argon2id-password-hashing]
+related: [system-design, service-auth, data-model, runbook, adr-0002-asymmetric-jwt-rotating-refresh, adr-0003-argon2id-password-hashing, adr-0004-rejected-doctors-can-sign-in, adr-0005-refresh-reuse-grace-window, adr-0006-email-first-registration-otp]
 ---
 
 # User Tokens and Sessions
@@ -52,8 +52,8 @@ refetch the JWKS (≤ 5 min). Runbook: [runbook.md](../runbook.md) → Rotate th
 | `sub` | user id as a string (e.g. `"1042"`) |
 | `typ` | `user` |
 | `role` | `patient` \| `doctor` \| `admin` |
-| `status` | `pending` \| `active` \| `suspended` \| `rejected` (never issued for the last two) |
-| `ev` | boolean — email verified at issue time |
+| `status` | `pending` \| `active` \| `rejected` (never issued for `suspended`; `rejected` accounts can sign in — ADR 0004) |
+| `ev` | boolean — email verified at issue time; always `true` for accounts created by `register/complete` (ADR 0006) |
 | `iat`, `exp` | `exp = iat + ACCESS_TOKEN_TTL_SECONDS` (900) |
 | `jti` | random UUID, for log correlation |
 
@@ -84,16 +84,18 @@ sequenceDiagram
     I->>DB: SELECT … FROM refresh_tokens WHERE token_hash = sha256(T1)
     alt unknown or expired
         I-->>C: 401 RefreshTokenInvalid (clear cookie)
-    else revoked with reason 'rotated' (T1 was already used) — REUSE
+    else rotated < 10 s ago and its successor is still live — GRACE (ADR 0005)
+        I-->>C: 401 RefreshTokenInvalid (family NOT revoked, cookie NOT cleared); metric refresh_token_grace_reuse
+    else revoked with reason 'rotated' outside the grace rule — REUSE
         I->>DB: BEGIN; UPDATE refresh_tokens SET revoked_at=now(), revoked_reason='reuse_detected' WHERE family_id=F AND revoked_at IS NULL; COMMIT
         I-->>C: 401 RefreshTokenReused (clear cookie); log warn + metric
     else revoked for another reason (logout, status_changed, …)
         I-->>C: 401 RefreshTokenInvalid (clear cookie)
     else live
         I->>DB: SELECT status, role, email_verified_at FROM users WHERE id = user_id AND deleted_at IS NULL
-        alt suspended or rejected
+        alt suspended
             I->>DB: revoke family F (reason 'status_changed')
-            I-->>C: 403 AccountSuspended / AccountRejected (clear cookie)
+            I-->>C: 403 AccountSuspended (clear cookie)
         else allowed
             I->>DB: BEGIN; SELECT … FOR UPDATE (T1); INSERT T2 (family F); UPDATE T1 SET revoked_at, revoked_reason='rotated', replaced_by_id=T2; COMMIT
             I-->>C: 200 { accessToken } + Set-Cookie vcare_rt = T2
@@ -102,8 +104,12 @@ sequenceDiagram
 ```
 
 - The rotation locks the presented row (`FOR UPDATE`) so two concurrent refreshes with the same token
-  cannot both succeed; the loser sees `revoked_reason='rotated'` and triggers reuse detection. This is
-  intentional: a legitimate client never sends the same refresh token twice.
+  cannot both succeed; the loser sees `revoked_reason='rotated'`. If the rotation happened less than
+  `REFRESH_REUSE_GRACE_SECONDS` (10 s) ago and the successor is still live, the loser gets `401 RefreshTokenInvalid`
+  with **no family revocation and no clearing cookie**, and the client retries once with the successor cookie
+  (browsers share one cookie jar across tabs). Otherwise reuse detection revokes the family. If the retry also fails,
+  the client calls logout, which revokes the presented token's family. See
+  [ADR 0005](../adr/0005-refresh-reuse-grace-window.md).
 - The new refresh token's `expires_at` is issue time + 30 days (sliding session); rate limit 30/min per family.
 - Budget: p95 < 50 ms (one indexed lookup, one PK read, one short transaction, one EdDSA sign).
 
@@ -116,7 +122,7 @@ sequenceDiagram
 | `POST /api/auth/change-password` | every family **except** the cookie's family | `password_changed` | password hash update |
 | `POST /api/auth/reset-password` | every family | `password_reset` | password hash update + `used_at` |
 | Status → `suspended` or `rejected` (admin or Care) | every family | `status_changed` | status update + `user_status_changes` row |
-| Refresh by a suspended/rejected user | that family | `status_changed` | — |
+| Refresh by a suspended user | that family | `status_changed` | — |
 | `DELETE /api/users/{id}/sessions` (admin) | every family | `admin_revoked` | — |
 | Account soft delete | every family | `account_deleted` | `deleted_at` update |
 
@@ -141,11 +147,14 @@ argon2id (`memoryCost=19456 KiB, timeCost=2, parallelism=1`); legacy bcrypt veri
 login; 10..128 chars; breached-password denylist; dummy argon2 verify for unknown emails; never logged or
 compared with `===`. Rationale: [ADR 0003](../adr/0003-argon2id-password-hashing.md).
 
-## 7. One-time tokens
-| Kind | TTL | Storage | Single use | On reissue |
-|---|---|---|---|---|
-| Email verification | 24 h | `email_verifications.token_hash` (sha256) | `verified_at` | earlier unused tokens get `invalidated_at` |
-| Password reset | 30 min | `password_resets.token_hash` (sha256) | `used_at` | earlier unused tokens get `invalidated_at` |
+## 7. One-time secrets
+| Kind | Format | TTL | Storage | Single use | On reissue |
+|---|---|---|---|---|---|
+| Registration code (ADR 0006) | 6 digits (CSPRNG) | 10 min from send, max 5 attempts | `registration_challenges.code_hash` = HMAC-SHA256(`OTP_PEPPER`, code), hex | `consumed_at` (same transaction as the `users` insert) | a new `register/start` sets `invalidated_at` on open challenges; the 5th failed attempt invalidates too |
+| Password reset | 256-bit random | 30 min from send | `password_resets.token_hash` (sha256) | `used_at` | earlier unused tokens get `invalidated_at` |
 
-Both are 256-bit random, sent only inside the email link, and compared by hash lookup. Forgot-password
-and resend-verification always return 204.
+Both secrets are **generated by the outbox worker at send time** (ADR 0007): the request only creates the row and
+the job; the worker writes the hash and `expires_at`, and the plaintext exists only in worker memory and the email.
+Registration codes are compared in constant time against the latest open challenge for the email; reset tokens by
+hash lookup. `register/start` and forgot-password always return a uniform response (`202` / `204`). Accounts are
+created already verified, so there is no separate verify-email flow.

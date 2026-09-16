@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: reference
-last_verified: 2026-09-14
+last_verified: 2026-09-15
 tags: [architecture, infrastructure, env, logging, health, rate-limit, shutdown]
-related: [system-design, overview, auth-tokens, runbook, quickstart]
+related: [system-design, overview, auth-tokens, runbook, quickstart, deployment, adr-0008-redis-tier-2-fallback-limiter, adr-0014-health-liveness-readiness-split]
 ---
 
 # Infrastructure and Cross-Cutting Concerns
@@ -30,13 +30,24 @@ Every variable is declared in the zod schema. **Secrets have no defaults.** The 
 | `ACCESS_TOKEN_TTL_SECONDS` | int | `900` | no | user access token lifetime |
 | `REFRESH_TOKEN_TTL_DAYS` | int | `30` | no | refresh token lifetime and cookie `Max-Age` |
 | `SERVICE_TOKEN_TTL_SECONDS` | int | `300` | no | service token lifetime |
-| `CORS_ORIGINS` | comma-separated list of origins (`https://…`) | — | no | CORS allowlist; credentials only for these |
+| `CORS_ORIGINS` | comma-separated list of origins (`https://…`) | — | no | CORS allowlist for local development; production is single-origin with CORS disabled (hub ADR 0005) |
 | `APP_BASE_URL` | URL | — | no | base for links in verification and reset emails |
 | `EMAIL_PROVIDER_API_KEY` | string | — | yes | email provider credential |
 | `EMAIL_PROVIDER_FROM` | email address | — | no | sender address |
 | `EMAIL_PROVIDER_BASE_URL` | URL | — | no | provider API endpoint |
 | `LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` | `info` | no | `debug` rejected when `NODE_ENV=production` |
 | `SHUTDOWN_TIMEOUT_MS` | int | `10000` | no | graceful shutdown deadline |
+| `OTP_PEPPER` | string ≥ 32 bytes | — | yes | HMAC key for registration codes (ADR 0006) |
+| `REFRESH_REUSE_GRACE_SECONDS` | int 0..30 | `10` | no | refresh grace window (ADR 0005) |
+| `RATE_LIMIT_FALLBACK_DIVISOR` | int ≥ 1 | `2` | no | per-instance fallback limit = max(1, floor(limit / divisor)) when Redis is down (ADR 0008) |
+| `HASH_CONCURRENCY` | int ≥ 1 | vCPU count | no | argon2 semaphore size |
+| `HASH_QUEUE_MAX` | int ≥ 0 | `50` | no | queued hashes before `429 RateLimited` |
+| `WORKER_POLL_INTERVAL_MS` | int | `1000` | no | outbox polling interval (worker only, ADR 0007) |
+| `WORKER_BATCH_SIZE` | int 1..100 | `20` | no | jobs claimed per poll (worker only) |
+| `OUTBOX_MAX_ATTEMPTS` | int ≥ 1 | `8` | no | attempts before a job is `dead` (worker only) |
+
+New rows above come from the 2026-09-15 baseline ([deployment.md](./deployment.md) → New configuration);
+`APP_BASE_URL` is still needed: it builds the password-reset links (verification links no longer exist, ADR 0006).
 
 Time arithmetic from these values uses `pkg/utils/time.ts` (`addTime`, `toMs`) — never inline math.
 
@@ -85,20 +96,25 @@ every log line, and it is stored on `user_status_changes.request_id`. Care forwa
 internal calls, so one id spans both services.
 
 ## 5. Health checks
+Current contract: `GET /api/health` and `GET /internal/health` (`SELECT 1` + Redis `PING`, 503 if either is down).
+**Approved replacement (ADR 0014, contract change pending):**
+
 | Endpoint | Listener | Checks | 200 | 503 |
 |---|---|---|---|---|
-| `GET /api/health` | public | `SELECT 1` on the pool; Redis `PING`; each with a 500 ms timeout | `{ "status": "ok", "checks": { "database": "up", "redis": "up" } }` | `{ "status": "degraded", "checks": { … "down" } }` |
-| `GET /internal/health` | internal | same | same | same |
+| `GET /api/health/live`, `GET /internal/health/live` | both | process only | `{ "status": "ok" }` | never |
+| `GET /api/health/ready`, `GET /internal/health/ready` | both | Postgres `SELECT 1` (500 ms) — fatal; Redis `PING` (500 ms) — reported only | `{ "status": "ok" \| "degraded", "checks": { "database": "up", "redis": "up" \| "down" } }` | Postgres down, or shutdown in progress |
 
+Load balancers use readiness; the orchestrator restarts on liveness. The edge never routes `/api/health/*`.
 Health responses are bare objects (not enveloped), carry `X-Request-Id`, require no token, and are not
-rate-limited. During shutdown both return 503 so load balancers drain the instance.
+rate-limited. During shutdown readiness returns 503 so load balancers drain the instance.
 
 ## 6. Graceful shutdown (`src/server.ts`)
 On `SIGTERM` / `SIGINT`:
 1. Mark not-ready: health endpoints return 503.
 2. Stop accepting new connections on **both** listeners (`server.close()`); in-flight requests continue.
 3. Wait for in-flight requests (including open transactions) up to `SHUTDOWN_TIMEOUT_MS`.
-4. Flush pending email jobs to the queue (never send synchronously during shutdown).
+4. Nothing to flush: email work is already durable in `outbox_jobs` (ADR 0007). The worker finishes its current
+   batch and exits; unfinished leases are re-claimed after `locked_until`.
 5. Destroy the Knex pool, quit Redis.
 6. Exit 0; if the deadline passes, log `error` with the count of unfinished requests and exit 1.
 
@@ -109,11 +125,14 @@ Uncaught exceptions and unhandled rejections log at `error` and trigger the same
 |---|---|---|---|---|
 | `login-ip-email` | `POST /api/auth/login` | IP + sha256(lower(email)) | 5 | 1 min |
 | `login-ip` | `POST /api/auth/login` | IP | 20 | 1 min |
-| `register-ip` | `POST /api/auth/register` | IP | 5 | 1 h |
+| `register-start-email` | `POST /api/auth/register/start` | sha256(lower(email)) | 3 | 1 h |
+| `register-start-ip` | `POST /api/auth/register/start` | IP | 5 | 1 h |
+| `register-complete-ip` | `POST /api/auth/register/complete` | IP | 10 | 1 h |
 | `forgot-email` | `POST /api/auth/forgot-password` | sha256(lower(email)) | 3 | 1 h |
-| `resend-email` | `POST /api/auth/resend-verification` | sha256(lower(email)) | 3 | 1 h |
 | `reset-ip` | `POST /api/auth/reset-password` | IP | 10 | 1 h |
-| `verify-ip` | `POST /api/auth/verify-email` | IP | 10 | 1 h |
+
+(The register rows replace `register-ip`, `resend-email`, and `verify-ip` from the current contract — ADR 0006;
+each registration challenge additionally allows at most 5 code attempts.)
 | `refresh-family` | `POST /api/auth/refresh` | `family_id` | 30 | 1 min |
 | `service-token-client` | `POST /internal/auth/token` | `client_id` | 60 | 1 min |
 
@@ -121,9 +140,12 @@ Uncaught exceptions and unhandled rejections log at `error` and trigger the same
 - A tripped limiter returns `429 RateLimited` with `Retry-After` (seconds) and logs `rate_limited` at `warn`.
 - Client IP comes from the socket, or from `X-Forwarded-For` only when the request arrives from the
   configured trusted proxy (Express `trust proxy` set to the ingress hop count).
-- **Redis unavailable:** limiters on credential routes (login, register, forgot, resend, reset, verify,
-  token) **fail closed** with `500 InternalError`; the refresh limiter fails open (the refresh token itself
-  is the protection) so a Redis outage does not log everyone out. Idempotency on register fails closed.
+- **Redis unavailable (ADR 0008 — Redis is Tier 2):** limiters on credential routes (login, register
+  start/complete, forgot, reset, token) switch to an **in-process per-task limiter** with
+  `max(1, floor(limit / RATE_LIMIT_FALLBACK_DIVISOR))`, emit `rate_limiter_degraded`, and alert
+  `RateLimiterDegraded`. The refresh limiter fails open (the refresh token itself is the protection).
+  Idempotency middleware is skipped; duplicate `register/complete` is stopped by database constraints.
+- Limiters run **before** body validation and password hashing, so rejected attempts cost no argon2 work.
 
 ## 8. Database connection
 - Knex over `pg`, pool size `DATABASE_POOL_MAX`; each new connection runs `SET TIME ZONE 'UTC'`.
@@ -137,6 +159,14 @@ Uncaught exceptions and unhandled rejections log at `error` and trigger the same
 - `Cache-Control: no-store` on every `/api/auth/*` response.
 
 ## 10. Background work
-Outside any request: email delivery (via the `lib/email` port, retried with backoff by the provider
-adapter's queue) and purge of expired/revoked token rows past retention. Neither may block or fail a
-request.
+Outside any request, in the separate `identity-worker` process (`src/worker.ts`, ADR 0007):
+- **Email delivery** from the transactional outbox (`outbox_jobs`): jobs `send_registration_code`,
+  `send_account_exists_notice`, `send_password_reset`. The worker generates the code/token at send time, stores
+  its hash, calls the provider through the `lib/email` port (5 s timeout), retries with exponential backoff,
+  and marks the job `dead` after `OUTBOX_MAX_ATTEMPTS`.
+- **Purges** under `pg_try_advisory_lock`, in batches of 5 k rows: `refresh_tokens` and `password_resets` 30 days
+  after expiry/revocation/use, `registration_challenges` after 24 h, `outbox_jobs` `done` after 7 days and `dead`
+  after 30 days.
+
+Neither may block or fail a request. Metrics: `outbox_oldest_pending_age_s`, `outbox_dead_jobs`
+([deployment.md](./deployment.md) → Observability).

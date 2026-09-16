@@ -5,10 +5,11 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# Environment files (commit only the example)
+# Environment files (commit only the example and the synthetic local test values)
 .env
 .env.*
 !.env.example
+!.env.test
 
 # skills.sh cross-agent install dir — not used; skills live in .claude/skills/
 .agents/

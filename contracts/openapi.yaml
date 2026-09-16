@@ -15,7 +15,7 @@ info:
     - Public listener (`PORT`, default `3000`): `/api/*`, `/.well-known/jwks.json`.
     - Internal listener (`INTERNAL_PORT`, default `3100`): `/internal/*`. Bound to the private interface only;
       ingress never routes `/internal`. Every `/internal/*` operation except `/internal/auth/token` and
-      `/internal/health` requires a **service token** (`typ=service`); a user token (even an admin's) gets
+      `/internal/health/*` requires a **service token** (`typ=service`); a user token (even an admin's) gets
       `401 ServiceTokenRequired`.
     - User access tokens are EdDSA (Ed25519) JWTs, 15 minutes, sent only as `Authorization: Bearer`.
       Consumers verify them locally against `GET /.well-known/jwks.json`.
@@ -51,7 +51,7 @@ tags:
   - name: keys
     description: Public signing keys (JWKS) for local token verification by consumers.
   - name: health
-    description: Liveness and dependency checks for both listeners.
+    description: Liveness and readiness probes for both listeners (ADR 0014).
 
 x-future-events:
   description: |
@@ -682,12 +682,12 @@ paths:
               schema: { $ref: '#/components/schemas/Jwks' }
         '500': { $ref: '#/components/responses/InternalError' }
 
-  /api/health:
+  /api/health/live:
     get:
-      operationId: getPublicHealth
+      operationId: getPublicLiveness
       tags: [health]
-      summary: Public listener health (Postgres + Redis)
-      description: Returned as a bare health object (not enveloped) so load balancers and probes can read it.
+      summary: Public listener liveness (process only)
+      description: No dependency checks; never 503 while the process can answer. Bare object (not enveloped). Not routed by the edge (ADR 0014).
       security: []
       x-roles: [public]
       x-ownership: none
@@ -696,22 +696,52 @@ paths:
         - $ref: '#/components/parameters/RequestIdHeader'
       responses:
         '200':
-          description: All dependencies reachable.
+          description: Process is alive.
           headers:
             X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthLive' }
+
+  /api/health/ready:
+    get:
+      operationId: getPublicReadiness
+      tags: [health]
+      summary: Public listener readiness (Postgres fatal, Redis reported)
+      description: |
+        Postgres `SELECT 1` (500 ms) is fatal; Redis `PING` (500 ms) is reported only (Redis is Tier 2, ADR 0008).
+        503 with `status: down` when Postgres is down or shutdown is in progress. Bare object (not enveloped).
+        Not routed by the edge (ADR 0014).
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-error-codes: []
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: Ready. `status` is `degraded` when Redis is down.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthStatus' }
+              examples:
+                ok:
+                  value: { status: ok, checks: { database: up, redis: up } }
+                redisDown:
+                  value: { status: degraded, checks: { database: up, redis: down } }
         '503':
-          description: At least one dependency unreachable.
+          description: Postgres unreachable, or shutdown in progress.
           headers:
             X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthStatus' }
-              example:
-                status: degraded
-                checks: { database: up, redis: down }
+              example: { status: down, checks: { database: down, redis: up } }
 
   # ── internal (internal listener only) ────────────────────────────────────────
   /internal/auth/token:
@@ -873,15 +903,15 @@ paths:
         '409': { $ref: '#/components/responses/InvalidStatusTransition' }
         '500': { $ref: '#/components/responses/InternalError' }
 
-  /internal/health:
+  /internal/health/live:
     servers:
       - url: http://localhost:3100
         description: Internal listener (network-isolated)
     get:
-      operationId: getInternalHealth
+      operationId: getInternalLiveness
       tags: [health]
-      summary: Internal listener health (Postgres + Redis)
-      description: No token required; reachable only on the private network. Bare health object (not enveloped).
+      summary: Internal listener liveness (process only)
+      description: No token required; reachable only on the private network. No dependency checks; never 503 while the process can answer. Bare object (not enveloped).
       security: []
       x-roles: [public]
       x-ownership: none
@@ -891,16 +921,47 @@ paths:
         - $ref: '#/components/parameters/RequestIdHeader'
       responses:
         '200':
-          description: All dependencies reachable.
+          description: Process is alive.
           headers:
             X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthLive' }
+
+  /internal/health/ready:
+    servers:
+      - url: http://localhost:3100
+        description: Internal listener (network-isolated)
+    get:
+      operationId: getInternalReadiness
+      tags: [health]
+      summary: Internal listener readiness (Postgres fatal, Redis reported)
+      description: |
+        No token required; reachable only on the private network. Postgres `SELECT 1` (500 ms) is fatal; Redis `PING`
+        (500 ms) is reported only (ADR 0008). 503 with `status: down` when Postgres is down or shutdown is in progress.
+        Bare object (not enveloped).
+      security: []
+      x-roles: [public]
+      x-ownership: none
+      x-scope: none
+      x-error-codes: []
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      responses:
+        '200':
+          description: Ready. `status` is `degraded` when Redis is down.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthStatus' }
         '503':
-          description: At least one dependency unreachable.
+          description: Postgres unreachable, or shutdown in progress.
           headers:
             X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthStatus' }
@@ -1367,11 +1428,18 @@ components:
         kid: { type: string, examples: [identity-2026-09] }
         alg: { type: string, const: EdDSA }
         use: { type: string, const: sig }
+    HealthLive:
+      type: object
+      description: Liveness body (ADR 0014).
+      required: [status]
+      properties:
+        status: { type: string, const: ok }
     HealthStatus:
       type: object
+      description: Readiness body (ADR 0014). `down` exactly when the response is 503.
       required: [status, checks]
       properties:
-        status: { type: string, enum: [ok, degraded] }
+        status: { type: string, enum: [ok, degraded, down] }
         checks:
           type: object
           required: [database, redis]

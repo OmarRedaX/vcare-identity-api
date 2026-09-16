@@ -3,7 +3,7 @@ title: Identity Service — Docs Index
 owner: identity-team
 service: identity-service
 status: draft
-last_verified: 2026-09-14
+last_verified: 2026-09-15
 tags: [index, router, identity]
 related: [service-card, system-design, runbook, quickstart]
 ---
@@ -15,7 +15,9 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 (cite sections by name, e.g. "CLAUDE.md → Security rules").
 
 > Status: design only — no application code exists yet. These docs are seeded from the PRD and
-> `CLAUDE.md`; `/system-design` refines them and `/update-docs` reconciles them with as-built code.
+> `CLAUDE.md`, refined by the 2026-09-15 `/system-design` baseline; `/update-docs` reconciles them with
+> as-built code. `CLAUDE.md` reflects the baseline; approved contract changes are pending — see
+> [architecture/design-baseline.md](./architecture/design-baseline.md).
 
 ## Service-level
 | Doc | Read it when you need to… | Lens |
@@ -23,18 +25,21 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [service-card.md](./service-card.md) | 30-second summary (owner, data, dependencies, callers, endpoints) — synced to the hub | — |
 | [system-design.md](./system-design.md) | find the architecture shard for a concern (router) | explanation |
 | [quickstart.md](./quickstart.md) | run the service locally for the first time and walk the auth flow with curl | tutorial |
-| [runbook.md](./runbook.md) | on-call: an alert fired, rotate a key or client secret, revoke sessions, trace a request | how-to |
+| [runbook.md](./runbook.md) | on-call: an alert fired, rotate a key or client secret, revoke sessions, create an admin, trace a request | how-to |
 
 ## Architecture (one doc = one job)
 | Doc | Read it when you need to… | Lens |
 |---|---|---|
-| [architecture/overview.md](./architecture/overview.md) | see the two listeners, module map, layering, request pipeline | explanation |
+| [architecture/design-baseline.md](./architecture/design-baseline.md) | see the system-design decisions (D1–D17), target API surface, data-model delta, pending contract/`CLAUDE.md` changes | explanation |
+| [architecture/capacity.md](./architecture/capacity.md) | check Identity's load, compute, storage, and Redis sizing derived from the hub's shared assumptions, and its 10× check | explanation |
+| [architecture/deployment.md](./architecture/deployment.md) | see Identity's runtime components, availability targets, release specifics, bottlenecks and mitigations, metrics and alerts | explanation |
+| [architecture/overview.md](./architecture/overview.md) | see the two listeners, worker, module map, layering, request pipeline | explanation |
 | [architecture/data-model.md](./architecture/data-model.md) | look up tables, columns, constraints, indexes, ERD | reference |
 | [architecture/api.md](./architecture/api.md) | look up an endpoint's roles, ownership, and error codes (human view of the contract) | reference |
-| [architecture/auth-tokens.md](./architecture/auth-tokens.md) | understand signing keys, access claims, refresh rotation, reuse detection, revocation | explanation |
+| [architecture/auth-tokens.md](./architecture/auth-tokens.md) | understand signing keys, access claims, refresh rotation, grace window, reuse detection, revocation | explanation |
 | [architecture/service-auth.md](./architecture/service-auth.md) | understand client credentials, scopes, the service guard, onboarding a new service client | explanation |
 | [architecture/infrastructure.md](./architecture/infrastructure.md) | look up env vars, logging/redaction, error envelope, health, shutdown, rate limits | reference |
-| [architecture/future.md](./architecture/future.md) | see what is deliberately deferred (events, MFA, social login, email change, AI client) | explanation |
+| [architecture/future.md](./architecture/future.md) | see what is deliberately deferred (events, MFA and admin provisioning, PII erasure, social login, email change, AI client) | explanation |
 
 ## Decisions (append-only)
 | ADR | Read it when you need to know why… | Lens |
@@ -42,6 +47,17 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [adr/0001-no-orm-knex-raw-sql.md](./adr/0001-no-orm-knex-raw-sql.md) | there is no ORM and migrations are raw SQL | explanation |
 | [adr/0002-asymmetric-jwt-rotating-refresh.md](./adr/0002-asymmetric-jwt-rotating-refresh.md) | tokens are EdDSA JWTs verified locally, refresh rotates, and the 15-min residual window is accepted | explanation |
 | [adr/0003-argon2id-password-hashing.md](./adr/0003-argon2id-password-hashing.md) | passwords use argon2id with a bcrypt legacy fallback | explanation |
+| [adr/0004-rejected-doctors-can-sign-in.md](./adr/0004-rejected-doctors-can-sign-in.md) | `rejected` accounts can log in and refresh (so Care's resubmission works) | explanation |
+| [adr/0005-refresh-reuse-grace-window.md](./adr/0005-refresh-reuse-grace-window.md) | a just-rotated refresh token re-presented within 10 s does not revoke the family | explanation |
+| [adr/0006-email-first-registration-otp.md](./adr/0006-email-first-registration-otp.md) | registration is start/complete with a 6-digit code and verify-email was removed | explanation |
+| [adr/0007-transactional-outbox-worker.md](./adr/0007-transactional-outbox-worker.md) | emails and purges run through a Postgres outbox and a separate worker | explanation |
+| [adr/0008-redis-tier-2-fallback-limiter.md](./adr/0008-redis-tier-2-fallback-limiter.md) | a Redis outage degrades rate limiting instead of blocking login | explanation |
+| [adr/0009-availability-and-recovery-targets.md](./adr/0009-availability-and-recovery-targets.md) | the targets are 99.95 %, multi-AZ, with the stated RPO/RTO | explanation |
+| [adr/0010-manual-admin-provisioning-role-policies.md](./adr/0010-manual-admin-provisioning-role-policies.md) | admins are inserted manually and set their password via reset; policies list roles explicitly | explanation |
+| [adr/0011-pii-retained-on-soft-delete.md](./adr/0011-pii-retained-on-soft-delete.md) | soft-deleted accounts keep their PII in MVP (and when that is revisited) | explanation |
+| [adr/0012-doctor-status-only-via-care.md](./adr/0012-doctor-status-only-via-care.md) | the admin status route refuses doctor targets | explanation |
+| [adr/0013-log-derived-metrics.md](./adr/0013-log-derived-metrics.md) | metrics come from structured logs and there is no tracing SDK | explanation |
+| [adr/0014-health-liveness-readiness-split.md](./adr/0014-health-liveness-readiness-split.md) | health is split into liveness and readiness | explanation |
 
 ## Contract (source of truth — prose above derives from it)
 | Contract | Defines | Lens |
@@ -53,10 +69,16 @@ contract and in [architecture/future.md](./architecture/future.md).
 
 ## Modules
 Module docs (`brainstorm.md`, `spec.md`, `tasks.md`, `manual-qa.md`, `reviews/`) appear under
-`docs/<module>/` as the workflow creates them (`/brainstorm` creates the folder). None exist yet;
-add a row here for each module when it is started.
+`docs/<module>/` as the workflow creates them (`/brainstorm` creates the folder). Add a row here for each
+module doc when it is created.
+
+| Doc | Read it when you need to… | Lens |
+|---|---|---|
+| [foundation/brainstorm.md](./foundation/brainstorm.md) | see the agreed scope of the starter skeleton (what is in and out before any business module) | explanation |
+| [foundation/spec.md](./foundation/spec.md) | build or change the skeleton: file list and exported APIs, env subset, error handler, logger redaction, idempotency and rate-limit behaviour, health, shutdown, Docker, CI, test plan | reference |
 
 ---
-_Cross-service questions (who calls us, Care's contract, data ownership, glossary, PRD) → the hub:
+_Platform-scope questions (platform overview, deployment topology, capacity assumptions, who calls us, Care's
+contract, data ownership, glossary, PRD) → the hub, where they live exclusively (hub ADR 0008):
 `../vcare-hub/INDEX.md` (on GitHub: [OmarRedaX/Vcare](https://github.com/OmarRedaX/Vcare/blob/main/INDEX.md)).
 Do not clone another service just to read its docs._

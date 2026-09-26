@@ -1,5 +1,6 @@
 import knex, { type Knex } from "knex";
 import { env } from "../config/env";
+import { logger } from "../logger/logger";
 import { buildKnexConfig } from "./knexfile";
 
 /** Request paths fail fast; migrations use migrationConfig (no timeout). */
@@ -10,5 +11,6 @@ export const db: Knex = knex(
     databaseUrl: env.DATABASE_URL,
     poolMax: env.DATABASE_POOL_MAX,
     statementTimeoutMs: STATEMENT_TIMEOUT_MS,
+    logger,
   }),
 );

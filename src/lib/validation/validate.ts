@@ -2,6 +2,7 @@ import { plainToInstance } from "class-transformer";
 import { validate, type ValidationError } from "class-validator";
 import { ValidationFailed } from "../error/errors";
 import type { ErrorDetail } from "../error/types";
+import { minPropertiesOf } from "./decorators";
 import type { ClassType } from "./types";
 
 const VALIDATOR_OPTIONS = {
@@ -47,6 +48,22 @@ export async function validateBody<T extends object>(dto: ClassType<T>, body: un
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw ValidationFailed.withDetails([{ field: "body", issue: "must be a JSON object" }]);
   }
+
+  // Class-level @MinProperties is counted on the raw body: every declared field exists as an own
+  // `undefined` property on the instance, so the instance cannot answer "how many were sent".
+  const minProperties = minPropertiesOf(dto);
+  if (minProperties !== undefined && Object.keys(body).length < minProperties) {
+    throw ValidationFailed.withDetails([
+      {
+        field: "body",
+        issue:
+          minProperties === 1
+            ? "must contain at least one property"
+            : `must contain at least ${String(minProperties)} properties`,
+      },
+    ]);
+  }
+
   return run(dto, body, false);
 }
 

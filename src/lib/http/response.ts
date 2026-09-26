@@ -14,6 +14,12 @@ export function sendSuccess<T>(
   res.status(status).json(body);
 }
 
+/** 202 with no body — `register/start` answers identically for known and unknown emails (BR-1). */
+export function sendAccepted(res: Response): void {
+  captureRoute(res.req, res);
+  res.status(202).end();
+}
+
 export function sendNoContent(res: Response): void {
   captureRoute(res.req, res);
   res.status(204).end();

@@ -3,12 +3,12 @@ title: foundation — Spec
 owner: identity-team
 service: identity-service
 module: foundation
-status: ready
-version: 1.0.0
+status: implemented
+version: 1.1.0
 diataxis: reference
-last_verified: 2026-09-15
+last_verified: 2026-09-16
 tags: [spec, foundation, bootstrap, infrastructure, health, idempotency, rate-limit, logging, testing, ci, docker]
-related: [foundation-brainstorm, infrastructure, deployment, overview, quickstart, design-baseline, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0013-log-derived-metrics, adr-0014-health-liveness-readiness-split]
+related: [foundation-brainstorm, foundation-tasks, foundation-manual-qa, adr-0015-foundation-runtime-dependencies, infrastructure, deployment, overview, quickstart, design-baseline, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0013-log-derived-metrics, adr-0014-health-liveness-readiness-split]
 contracts: [contracts/openapi.yaml]
 ---
 
@@ -75,8 +75,9 @@ The four health operations are the only routes. They are infrastructure probes a
 `authorize(...)` (documented exception, brainstorm → Primary flows). They are not rate-limited, not idempotent, need
 no token, are not enveloped, and the edge never routes them (hub ADR 0005).
 
-> **Contract status:** the change in §3.3 has been applied to `contracts/openapi.yaml` (2026-09-15). Hub sync is
-> still pending.
+> **Contract status:** the change in §3.3 has been applied to `contracts/openapi.yaml` (2026-09-15) and the code
+> matches it (verified 2026-09-16, §15). The hub's contract copy already matches; the service-card re-sync is
+> pending (§15.4).
 
 ### 3.1 Liveness — `GET /api/health/live` (public listener), `GET /internal/health/live` (internal listener)
 
@@ -1116,3 +1117,62 @@ metrics (added with the observability work that needs them), OpenTelemetry (ADR 
 ## 14. Open questions
 None. Parity decisions with care-service were approved on 2026-09-15 (§12 checklist). Remaining defaults are
 minor and reviewable: the `TRUST_PROXY_HOPS` env var, and the redaction additions in §4.6.
+
+---
+
+## 15. As-built notes (2026-09-16, spec 1.1.0)
+
+Reconciled by `/update-docs foundation` against the code on `main` plus the uncommitted QA artefacts
+(`docs/foundation/manual-qa.md`, `scripts/curl-test-foundation.sh`). Sections 1–14 are the build-time spec and are
+kept as written; where they differ from the code, **this section wins**. No divergence changes an HTTP shape: the
+four health operations, the error envelope, and `X-Request-Id` match `contracts/openapi.yaml` (integration
+contract-conformance tests and manual QA, 35/35 cases).
+
+### 15.1 Intentional divergences
+
+| # | Spec said | As built | Where |
+|---|---|---|---|
+| 1 | `AppOptions { extraApiRouter? }`, `InternalAppOptions { extraInternalRouter? }`; `buildPublicRouter()` / `buildInternalRouter()` / `buildHealthRouter()` take no arguments (§4.17) | both option types also carry `scope?: DependencyContainer`; the three router builders take an optional `scope` (default: the root container) and resolve controllers from it, so tests wire the child container returned by `registerDependencies(overrides)` | `src/types.ts`, `src/app.ts`, `src/internal-app.ts`, `src/routes.ts`, `src/internal-routes.ts`, `src/app/health/routes.ts` |
+| 2 | `docker-compose.test.yml` publishes no host ports (§7) | Postgres on host **5435** and Redis on host **6382**, so `npm run test:integration`, `npm run migrate` and manual QA can run from the host next to the dev stack (5432/6379) and Care's stacks (5433/6380 dev, 5434/6381 test). The hermetic `run --rm test` form still uses the in-network ports | `docker-compose.test.yml` |
+| 3 | `tests/setup.ts` calls `process.loadEnvFile(".env.test")` (§9.1) | parses `.env.test` itself and assigns only variables that are unset or empty: `loadEnvFile` mutates the Jest worker's real `process`, while each test file gets a copy of `process.env` taken before `setupFiles` runs | `tests/setup.ts` |
+| 4 | `global-setup.ts` runs `latest` once (§9.1) | `SELECT 1` + `migrate.latest()` retried up to 3 attempts, 250 ms apart: the 1 s pool acquire timeout (§4.10) can trip while the migration loader transpiles files on a cold start | `tests/integration/global-setup.ts` |
+| 5 | helpers listed in §9.1 | plus `tests/helpers/contract.ts` — reads schema and enum facts straight from `contracts/openapi.yaml` (no YAML dependency) for contract-conformance assertions | `tests/helpers/contract.ts` |
+| 6 | `migrate.ts` logs `migrations_applied { batch, count }` (§4.17) | `migrations_applied { batch, count, files }`, `migrations_rolled_back { batch, count, files, all }`, `migrations_status { completed, pending }`, `migration_created { file }`; failures log `migration_failed`, `migration_command_unknown`, `migration_command_missing`, `migration_name_invalid` and exit 1. A bare `node dist/migrate.js` (no command) exits 1 — the production task must pass `latest` | `src/migrate.ts` |
+| 7 | `redact(value)` (§4.6) | `redact(value, includeStack = true)` — the logger passes `includeStack = level === "error"`; `isRedactedKey(key)` is exported; `Date` values serialize to ISO strings | `src/lib/logger/redact.ts` |
+| 8 | `metric()` `Dimensions: [[…dimension keys]]` (§4.6) | `Dimensions: []` when no dimensions are passed | `src/lib/logger/logger.ts` |
+| 9 | idempotency rows 9 and 11 separate (§4.12) | one path: when `SET NX` fails and the stored record is missing, unparsable, or has the wrong `v`, the key is deleted and the claim retried once; if that claim also fails → row 8 (`409 Conflict`, `Retry-After: 1`) | `src/lib/idempotency/idempotency.ts` |
+| 10 | Lua script "registered with `redis.defineCommand`" (§4.13) | defined lazily on the first limiter call for each client (`ensureCommand`), same command name `rlSlidingWindow` | `src/lib/rate-limit/rate-limit.ts` |
+| 11 | `server_listening { listener, port, host }` (§4.17) | the public listener logs `host: "0.0.0.0"` (it binds all interfaces); the internal one logs `INTERNAL_HOST` | `src/server.ts` |
+
+### 15.2 Verified as specified
+Env schema and refinements (§4.2), DI tokens and `bootstrap.ts` (§4.3), error-handler mapping (§4.4), request id
+(§4.5), redaction key list and `requestLogger` health-route suppression (§4.6), CORS dev-only on the public listener
+(§4.7), knex pool (UTC, 2 s statement timeout, 1 s acquire, migrations pool 2 without timeout — §4.10), Redis client
+options (§4.11), idempotency key format and TTLs (§4.12), rate-limit key, 50 ms budget, degrade modes (§4.13),
+worker loop (§4.14), health decision table (§3.2), shutdown sequence (§4.17), migration (§2), `package.json`
+dependencies and scripts (§5), Dockerfile, dev compose, CI (§7, §8). Tests: 23 unit suites (161 tests), 9
+integration suites (55 passed, 2 signal-based cases skipped on Windows and run on CI).
+
+### 15.3 Open issues found during QA and docs reconciliation (not fixed here)
+- **Knex writes non-JSON lines to stdout during a Postgres outage** (`Acquire connection error …` with a raw stack
+  trace, from Knex's default logger). This breaks "one JSON line per event" (CLAUDE.md → Privacy and logging) for log
+  pipelines; no secret or PII observed. **Resolved 2026-09-16:** optional `KnexOptions.logger` installs a `log`
+  override built by `buildKnexLog`, emitting `knex_warn` / `knex_error` / `knex_deprecated` JSON lines with only the
+  message's first line as `detail`; `lib/knex/knex.ts` and `migrate.ts` pass `logger`. Covered by
+  `tests/unit/lib/knex/knexfile.test.ts` and checked against an unreachable Postgres.
+- **`INTERNAL_HOST` defaults to `127.0.0.1`.** Right for local runs; in a container the internal load balancer
+  cannot reach `/internal/*` or `/internal/health/ready` unless the task sets `INTERNAL_HOST` to its private
+  interface address (dev compose sets `0.0.0.0`). Recorded in `architecture/deployment.md` → New configuration.
+- No `/review-code foundation` has run yet (no `reviews/` folder).
+
+### 15.4 Docs reconciled (§12)
+`architecture/infrastructure.md`, `architecture/overview.md`, `architecture/api.md`, `architecture/deployment.md`,
+`architecture/design-baseline.md` (status line only), `system-design.md`, `quickstart.md`, `runbook.md`,
+`service-card.md`, `INDEX.md` — all 2026-09-16. Still open:
+- **Hub sync** (user step): `../vcare-hub/scripts/sync-from-spoke.sh identity-service ../vcare-identity-api` —
+  the service card changed (status, health family); the contract copy already matches.
+- **`CLAUDE.md` → Folder structure and layering**: the `lib/http/` line omits `route-capture.ts`; everything else
+  in the §12 row (`bootstrap.ts`, `migrate.ts`, `worker.ts`, `lib/lifecycle/`, `lib/worker/`, `cors.ts`,
+  `no-store.ts`, `client-ip.ts`) is already listed. Left for a human edit (docs updater does not change `CLAUDE.md`).
+- **Care parity** (§12 checklist): not re-verified against care-service code in this run; Care's foundation spec is
+  still `status: ready`.

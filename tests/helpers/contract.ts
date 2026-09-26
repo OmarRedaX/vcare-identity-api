@@ -132,3 +132,91 @@ export function expectHealthStatusBody(body: unknown, httpStatus: number): void 
   expect(contractDependencyStates()).toContain(parsed.checks.redis);
   expect(parsed.status === "down").toBe(httpStatus === 503);
 }
+
+// ── auth (module: auth) ─────────────────────────────────────────────────────
+
+/** The two `vcare_rt` examples the contract fixes, in file order: set, then clear. */
+function contractCookieExamples(): { set: string; clear: string } {
+  const examples = [...CONTRACT.matchAll(/'(vcare_rt=[^']*)'/g)].map((match) => match[1] ?? "");
+  const [set, clear] = examples;
+  if (set === undefined || clear === undefined) {
+    throw new Error("the vcare_rt cookie examples are missing from contracts/openapi.yaml");
+  }
+  return { set, clear };
+}
+
+function attributesOf(cookie: string): string[] {
+  return cookie
+    .split(";")
+    .slice(1)
+    .map((part) => part.trim());
+}
+
+/** Asserts a Set-Cookie header against the contract's SetRefreshCookie / ClearRefreshCookie examples. */
+export function expectRefreshCookie(header: string | undefined, kind: "set" | "clear"): string {
+  expect(typeof header).toBe("string");
+  const cookie = header ?? "";
+  const examples = contractCookieExamples();
+  const example = kind === "set" ? examples.set : examples.clear;
+
+  expect(attributesOf(cookie)).toEqual(attributesOf(example));
+  const value = cookie.slice("vcare_rt=".length).split(";")[0] ?? "";
+  if (kind === "clear") {
+    expect(value).toBe("");
+  } else {
+    expect(value).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  }
+  return value;
+}
+
+/** Asserts the success envelope of CLAUDE.md -> API conventions and returns `data`. */
+export function expectSuccessEnvelope(body: unknown): unknown {
+  const envelope = body as { success: boolean; data: unknown };
+  for (const key of contractRequired("SuccessEnvelope")) {
+    expect(Object.keys(envelope)).toContain(key);
+  }
+  expect(envelope.success).toBe(true);
+  return envelope.data;
+}
+
+/** Asserts a `User` payload against contracts/openapi.yaml -> schemas.User. */
+export function expectUserPayload(data: unknown): Record<string, unknown> {
+  const user = data as Record<string, unknown>;
+  expect(Object.keys(user).sort()).toEqual([...contractRequired("User")].sort());
+  expect(typeof user.id).toBe("number");
+  expect(contractRoles()).toContain(user.role);
+  expect(contractStatuses()).toContain(user.status);
+  return user;
+}
+
+export function contractRoles(): string[] {
+  return inlineList(schemaBlock("UserRole"), "enum");
+}
+
+export function contractStatuses(): string[] {
+  return inlineList(schemaBlock("UserStatus"), "enum");
+}
+
+/** Asserts an `AccessTokenResponse` payload (also the base of `LoginResponse`). */
+export function expectAccessTokenPayload(data: unknown): string {
+  const payload = data as { accessToken: string; tokenType: string; expiresIn: number };
+  for (const key of contractRequired("AccessTokenResponse")) {
+    expect(Object.keys(payload)).toContain(key);
+  }
+  expect(payload.tokenType).toBe("Bearer");
+  expect(payload.expiresIn).toBe(900);
+  expect(typeof payload.accessToken).toBe("string");
+  return payload.accessToken;
+}
+
+/** Asserts a bare JWK Set against contracts/openapi.yaml -> schemas.Jwks / Jwk. */
+export function expectJwksDocument(body: unknown): void {
+  const document = body as { keys: Record<string, unknown>[] };
+  for (const key of contractRequired("Jwks")) {
+    expect(Object.keys(document)).toContain(key);
+  }
+  expect(document.keys.length).toBeGreaterThanOrEqual(1);
+  for (const jwk of document.keys) {
+    expect(Object.keys(jwk).sort()).toEqual([...contractRequired("Jwk")].sort());
+  }
+}

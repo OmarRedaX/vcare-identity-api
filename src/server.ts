@@ -3,7 +3,10 @@ import http from "node:http";
 import { createApp } from "./app";
 import { registerDependencies } from "./bootstrap";
 import { createInternalApp } from "./internal-app";
+import type { SigningKeySet } from "./lib/auth/types";
 import { env } from "./lib/config/env";
+import { EnvRequirementError, requireApiConfig } from "./lib/config/requirements";
+import { TOKENS } from "./lib/di/tokens";
 import { db } from "./lib/knex/knex";
 import { lifecycle } from "./lib/lifecycle/lifecycle";
 import { logger } from "./lib/logger/logger";
@@ -38,7 +41,21 @@ function closeServer(server: http.Server): Promise<void> {
 }
 
 export async function startServer(): Promise<RunningServer> {
-  registerDependencies();
+  const scope = registerDependencies();
+
+  // The API's own environment set, checked before anything binds (spec §5.7).
+  try {
+    requireApiConfig(env);
+    // Resolved eagerly so a malformed JWT_PRIVATE_KEYS fails the boot, not the first login.
+    scope.resolve<SigningKeySet>(TOKENS.SigningKeys);
+  } catch (err) {
+    if (err instanceof EnvRequirementError) {
+      logger.error("invalid_environment", { keys: err.missingKeys });
+      process.exit(1);
+    }
+    throw err;
+  }
+
   connectRedis(redis, logger);
 
   const publicServer = http.createServer(createApp());

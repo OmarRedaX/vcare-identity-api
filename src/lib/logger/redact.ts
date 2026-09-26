@@ -19,7 +19,17 @@ export const REDACTED_KEYS: readonly string[] = [
   "clientSecretHash",
   "tokenHash",
   "codeHash",
+  // One-time secrets (ADR 0006, ADR 0017). `code` is deliberately absent: it would hide AppError.code in
+  // error logs — callers simply never pass a registration or reset code (spec §9.4).
+  "otp",
+  "otpPepper",
+  "registrationCode",
+  "resetCode",
   "privateJwk",
+  "jwtPrivateKeys",
+  "apiKey",
+  "emailProviderApiKey",
+  "deviceInfo",
   "authorization",
   "cookie",
   "set-cookie",

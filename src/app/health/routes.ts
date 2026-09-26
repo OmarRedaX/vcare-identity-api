@@ -3,6 +3,7 @@ import type { DependencyContainer } from "tsyringe";
 import { container as rootContainer } from "../../lib/di/container";
 import { TOKENS } from "../../lib/di/tokens";
 import { sealRouter } from "../../lib/http/route-capture";
+import { markProbeExempt } from "../../lib/rbac/assert-routes-authorized";
 import type { HealthController } from "./controller/health.controller";
 
 /**
@@ -19,5 +20,6 @@ export function buildHealthRouter(scope: DependencyContainer = rootContainer): R
     controller.ready(req, res).catch(next);
   });
 
-  return sealRouter(router);
+  // Explicitly exempt from the boot-time authorize check (lib/rbac/assert-routes-authorized).
+  return markProbeExempt(sealRouter(router));
 }

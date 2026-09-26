@@ -30,6 +30,9 @@ function clientStatus(err: unknown): number | undefined {
 }
 
 function send(res: Response, requestId: string, error: AppError, details: readonly ErrorDetail[]): void {
+  if (error.retryAfterSeconds !== undefined && !res.hasHeader("Retry-After")) {
+    res.setHeader("Retry-After", String(Math.max(1, error.retryAfterSeconds)));
+  }
   const body: ErrorBody = {
     success: false,
     error: {

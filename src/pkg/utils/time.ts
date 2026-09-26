@@ -19,3 +19,12 @@ export function toMs(amount: number, unit: DurationUnit): number {
 export function addTime(date: Date, amount: number, unit: DurationUnit): Date {
   return new Date(date.getTime() + toMs(amount, unit));
 }
+
+export function subtractTime(date: Date, amount: number, unit: DurationUnit): Date {
+  return new Date(date.getTime() - toMs(amount, unit));
+}
+
+/** Inclusive of the instant itself: an expiry exactly at `now` has passed. */
+export function isPast(date: Date, now: Date): boolean {
+  return date.getTime() <= now.getTime();
+}

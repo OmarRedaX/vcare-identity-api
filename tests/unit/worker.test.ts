@@ -59,11 +59,13 @@ describe("startWorker", () => {
     const code = await worker.shutdown("SIGTERM");
 
     expect(code).toBe(0);
-    expect(order).toEqual(["loop.stop", "db.destroy"]);
+    // Both loops (outbox and purge) stop before the pools are closed.
+    expect(order).toEqual(["loop.stop", "loop.stop", "db.destroy"]);
     expect(mockOf(redis, "disconnect")).toHaveBeenCalled();
     expect(runLoopMock).toHaveBeenCalledWith(
-      expect.objectContaining({ name: "worker", intervalMs: env.WORKER_POLL_INTERVAL_MS }),
+      expect.objectContaining({ name: "outbox", intervalMs: env.WORKER_POLL_INTERVAL_MS }),
     );
+    expect(runLoopMock).toHaveBeenCalledWith(expect.objectContaining({ name: "purge" }));
   });
 
   it("should run the sequence once when two signals arrive", async () => {

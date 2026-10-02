@@ -4,50 +4,60 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: tutorial
-last_verified: 2026-09-15
-tags: [tutorial, getting-started, local-dev, curl]
-related: [infrastructure, api, auth-tokens, design-baseline]
+last_verified: 2026-09-16
+tags: [tutorial, getting-started, local-dev, curl, docker, tests]
+related: [infrastructure, api, auth-tokens, design-baseline, foundation-spec, foundation-manual-qa]
 ---
 
 # Quickstart (tutorial)
 
-From zero to a logged-in user with a refreshed session, on your machine.
+From zero to a running service with healthy listeners (sections 1–3, **works today**), then, once the auth
+modules exist, to a logged-in user with a refreshed session (sections 4–5, **planned**).
 
-> No application code exists yet. Every command marked `(planned)` shows the intended shape once the
-> modules are built through the workflow. The curl requests follow `contracts/openapi.yaml` exactly.
-
-> **Will change with the 2026-09-15 baseline:** steps 4.1–4.2 become `POST /api/auth/register/start` (read the
-> 6-digit code from the local mail catcher) then `POST /api/auth/register/complete` (account created verified; no
-> verify-email step); health checks become `/api/health/ready` and `/internal/health/ready`; local runs also start
-> the worker (`npm run worker`, planned) so emails are delivered; `.env` gains `OTP_PEPPER`. This tutorial is
-> rewritten by `/update-docs` once the contract changes — see
-> [architecture/design-baseline.md](./architecture/design-baseline.md).
+> **Status (2026-09-16):** the `foundation` module is built — tooling, Docker, both listeners, health probes,
+> migrations, the worker loop, and the test suites. No business endpoint exists yet, so sections 4–5 still show
+> the intended shape from the contract; commands and variables marked `(planned)` do not exist yet. `.env` gains
+> `OTP_PEPPER` with the registration module.
 
 ## 1. Prerequisites
-- Node.js 24 LTS
-- PostgreSQL 16 with the `citext` extension available
-- Redis 7
+- Node.js 24 LTS (`engines: >=24 <25`)
+- Docker with Compose (for PostgreSQL 17 and Redis 7), or your own PostgreSQL 17 with the `citext` extension
+  available and Redis 7
 - `curl`, and `uuidgen` (or any UUID generator)
 
 ## 2. Configure
 ```bash
-cp .env.example .env    # (planned)
+npm install
+cp .env.example .env
 ```
-Minimum `.env` for local development (synthetic values only):
+`.env.example` holds synthetic values only. The variables the service reads today (full list with types and defaults:
+[architecture/infrastructure.md](./architecture/infrastructure.md) → Environment variables):
 ```bash
 NODE_ENV=development
 PORT=3000
 INTERNAL_PORT=3100
 INTERNAL_HOST=127.0.0.1
+TRUST_PROXY_HOPS=0
 DATABASE_URL=postgres://identity:identity@localhost:5432/vcare_identity
+DATABASE_POOL_MAX=10
 REDIS_URL=redis://localhost:6379
+CORS_ORIGINS=http://localhost:5173
+LOG_LEVEL=info
+SHUTDOWN_TIMEOUT_MS=10000
+RATE_LIMIT_FALLBACK_DIVISOR=2
+WORKER_POLL_INTERVAL_MS=1000
+```
+Only `DATABASE_URL` and `REDIS_URL` are required; the rest have defaults. If a variable is invalid, the process exits
+with code 1 and logs `invalid_environment` with the offending keys (never their values).
+
+Added by the auth and outbox modules `(planned)`, synthetic values only:
+```bash
 # JWT_PRIVATE_KEYS is set by the keygen step below: a JSON array of {"kid", "privateJwk"} (Ed25519). Never commit it.
 JWT_PRIVATE_KEYS=
 JWT_ACTIVE_KID=local-dev-1
 ACCESS_TOKEN_TTL_SECONDS=900
 REFRESH_TOKEN_TTL_DAYS=30
 SERVICE_TOKEN_TTL_SECONDS=300
-CORS_ORIGINS=http://localhost:5173
 APP_BASE_URL=http://localhost:5173
 EMAIL_PROVIDER_API_KEY=local-dev-not-sent
 EMAIL_PROVIDER_FROM=no-reply@example.test
@@ -57,51 +67,76 @@ Generate a local signing key (never reuse it anywhere else):
 ```bash
 npm run keys:generate -- --kid local-dev-1   # (planned) prints the JWT_PRIVATE_KEYS entry
 ```
-In development the email adapter writes messages to the log-safe local mail catcher at
-`EMAIL_PROVIDER_BASE_URL` instead of sending them; open it to read verification links.
+In development the email adapter `(planned)` writes messages to the log-safe local mail catcher at
+`EMAIL_PROVIDER_BASE_URL` instead of sending them; open it to read registration codes and reset links.
 
-## 3. Install, migrate, run
+## 3. Start dependencies, migrate, run
+Start PostgreSQL 17 (host port 5432, database `vcare_identity`) and Redis 7 (host port 6379):
 ```bash
-npm install          # (planned)
-npm run migrate      # (planned) creates citext + identity tables
-npm run dev          # (planned) public listener :3000, internal listener :3100
+docker compose up -d postgres redis
 ```
+Apply migrations (today: the `citext` extension), then start the API and, in a second terminal, the worker:
+```bash
+npm run migrate          # also: npm run migrate:status, npm run migrate:rollback
+npm run dev              # public listener :3000, internal listener :3100 (tsx watch)
+npm run dev:worker       # worker loop; job handlers arrive with the outbox module
+```
+Alternative: build the image and run the whole stack (postgres, redis, migrate, api, worker) in Docker with
+`docker compose up -d --build`. Care's stack uses host ports 5433/6380/3001/3101, so both run side by side.
+
 Check both listeners:
 ```bash
-curl -s http://localhost:3000/api/health
-curl -s http://localhost:3100/internal/health
+curl -s http://localhost:3000/api/health/live
+curl -s http://localhost:3000/api/health/ready
+curl -s http://localhost:3100/internal/health/ready
 ```
-Expect `{"status":"ok","checks":{"database":"up","redis":"up"}}` from each.
+Expect `{"status":"ok"}` from liveness and `{"status":"ok","checks":{"database":"up","redis":"up"}}` from each
+readiness probe. Stop Redis (`docker compose stop redis`) and readiness answers `200` with `"status":"degraded"`;
+stop Postgres and it answers `503` with `"status":"down"`. Liveness stays `200` either way. Start them again with
+`docker compose start redis postgres`.
 
-## 4. Walk the auth flow
+### Run the checks and tests
+```bash
+npm run lint
+npm run typecheck
+npm test                                                      # unit suites, no infrastructure
+docker compose -f docker-compose.test.yml up -d --wait        # test Postgres on 5435, Redis on 6382
+npm run test:integration                                      # real Postgres + Redis
+docker compose -f docker-compose.test.yml run --rm test       # hermetic: lint, typecheck, unit, integration (what CI runs)
+docker compose -f docker-compose.test.yml down -v
+```
+The CURL walkthrough of every foundation behaviour is [foundation/manual-qa.md](./foundation/manual-qa.md), and
+its repeatable form is `scripts/curl-test-foundation.sh` (set `PUBLIC_URL` / `INTERNAL_URL` to your listeners).
+
+## 4. Walk the auth flow (planned)
 Set up a cookie jar (the refresh token lives only in the `vcare_rt` cookie) and a helper for request ids:
 ```bash
 JAR=$(mktemp)
 rid() { uuidgen | tr 'A-Z' 'a-z'; }
 ```
 
-### 4.1 Register a patient
+### 4.1 Start registration
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:3000/api/auth/register/start \
+  -H "Content-Type: application/json" \
+  -H "X-Request-Id: $(rid)" \
+  -d '{"email":"sara.patient@example.test"}'
+```
+Expect `202` — the same answer whether or not the email is already registered. With the worker running, open the
+local mail catcher and copy the 6-digit code (valid 10 minutes, 5 attempts). Running it again sends a new code.
+
+### 4.2 Complete registration
 `Idempotency-Key` is required here. Re-running the same command with the same key replays the response.
 ```bash
 IDEM=$(rid)
-curl -s -X POST http://localhost:3000/api/auth/register \
+curl -s -X POST http://localhost:3000/api/auth/register/complete \
   -H "Content-Type: application/json" \
   -H "X-Request-Id: $(rid)" \
   -H "Idempotency-Key: $IDEM" \
-  -d '{"email":"sara.patient@example.test","password":"correct-horse-battery-9","fullName":"Sara Patient","role":"patient","timezone":"Africa/Cairo","locale":"en-EG"}'
+  -d '{"email":"sara.patient@example.test","code":"<6-digit code>","password":"correct-horse-battery-9","fullName":"Sara Patient","role":"patient","timezone":"Africa/Cairo","locale":"en-EG"}'
 ```
-Expect `201` with `data.status = "active"` and `data.emailVerifiedAt = null`.
-Try the same key with a different body — expect `422 IdempotencyConflict`.
-
-### 4.2 Verify the email
-Open the verification email in the local mail catcher and copy the `token` from the link, then:
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:3000/api/auth/verify-email \
-  -H "Content-Type: application/json" \
-  -H "X-Request-Id: $(rid)" \
-  -d '{"token":"<token from the email link>"}'
-```
-Expect `204`. Running it again is also `204` (no-op).
+Expect `201` with `data.status = "active"` and `data.emailVerifiedAt` set. A wrong code is
+`400 ValidationFailed` (`field: code`). Try the same key with a different body — expect `422 IdempotencyConflict`.
 
 ### 4.3 Log in
 ```bash
@@ -148,7 +183,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -b "$JAR" -c "$JAR" -X POST http://loca
 ```
 Expect `204` and a cleared cookie. The access token still works until it expires (at most 15 minutes).
 
-## 5. Try the internal API (optional)
+## 5. Try the internal API (optional, planned)
 Seed a local service client, then exchange credentials on the internal listener:
 ```bash
 npm run seed:service-client -- --client-id care-service --scopes "users:read users:status:write" --audiences vcare-identity   # (planned) prints a one-time secret

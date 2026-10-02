@@ -1,4 +1,4 @@
-import { buildKnexConfig, migrationConfig } from "../../../../src/lib/knex/knexfile";
+import { buildKnexConfig, buildKnexLog, migrationConfig } from "../../../../src/lib/knex/knexfile";
 
 interface ConnectionShape {
   connectionString: string;
@@ -68,5 +68,37 @@ describe("migrationConfig", () => {
     expect(config.pool?.max).toBe(2);
     expect(config.migrations?.tableName).toBe("knex_migrations");
     expect(String(config.migrations?.directory)).toContain("migrations");
+  });
+});
+
+describe("buildKnexLog", () => {
+  const makeLogger = () => ({ debug: jest.fn(), warn: jest.fn(), error: jest.fn() });
+
+  it("should route Knex warnings through the logger with only the first line when the message has a stack", () => {
+    const logger = makeLogger();
+    const log = buildKnexLog(logger);
+
+    log.warn?.("Acquire connection error: Error: connect ECONNREFUSED\n    at TCPConnectWrap.afterConnect");
+
+    expect(logger.warn).toHaveBeenCalledWith("knex_warn", { detail: "Acquire connection error: Error: connect ECONNREFUSED" });
+  });
+
+  it("should route Knex errors and deprecations through the logger when they occur", () => {
+    const logger = makeLogger();
+    const log = buildKnexLog(logger);
+
+    log.error?.(new Error("pool failed\nstack"));
+    log.deprecate?.("oldMethod", "newMethod");
+
+    expect(logger.error).toHaveBeenCalledWith("knex_error", { detail: "pool failed" });
+    expect(logger.warn).toHaveBeenCalledWith("knex_deprecated", { method: "oldMethod", alternative: "newMethod" });
+  });
+
+  it("should install the structured log only when a logger is given", () => {
+    const logger = makeLogger();
+
+    expect(buildKnexConfig({ databaseUrl: DATABASE_URL, poolMax: 1, statementTimeoutMs: 2000 }).log).toBeUndefined();
+    expect(buildKnexConfig({ databaseUrl: DATABASE_URL, poolMax: 1, statementTimeoutMs: 2000, logger }).log?.enableColors).toBe(false);
+    expect(migrationConfig(DATABASE_URL, logger).log).toBeDefined();
   });
 });

@@ -3,8 +3,11 @@ import type { Router } from "express";
 import type Redis from "ioredis";
 import type { Knex } from "knex";
 import type { DependencyContainer } from "tsyringe";
+import type { SigningKeySet } from "./lib/auth/types";
+import type { EmailPort } from "./lib/email/types";
 import type { Lifecycle } from "./lib/lifecycle/lifecycle";
 import type { Logger } from "./lib/logger/logger";
+import type { Clock } from "./lib/time/types";
 
 /** Tests replace infrastructure singletons; production passes nothing. */
 export interface DependencyOverrides {
@@ -12,6 +15,12 @@ export interface DependencyOverrides {
   redis?: Redis;
   logger?: Logger;
   lifecycle?: Lifecycle;
+  /** Lets tests control "now" without faking the process clock. */
+  clock?: Clock;
+  /** Pre-loaded key set, so tests need not put key material in the environment. */
+  signingKeys?: SigningKeySet;
+  /** The only mock integration tests may use (CLAUDE.md -> Testing policy). */
+  emailPort?: EmailPort;
 }
 
 export interface AppOptions {

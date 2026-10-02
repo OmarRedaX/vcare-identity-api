@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: explanation
-last_verified: 2026-09-15
+last_verified: 2026-09-16
 tags: [system-design, architecture, router, identity]
 related: [overview, data-model, api, auth-tokens, service-auth, infrastructure, future, design-baseline, capacity, deployment]
 ---
@@ -24,20 +24,26 @@ This page is the **router**. Architecture is sharded — one document per concer
 | [architecture/api.md](./architecture/api.md) | look up endpoints by tag with roles, ownership, error codes (mirrors the current contract; pending changes in design-baseline) | reference |
 | [architecture/auth-tokens.md](./architecture/auth-tokens.md) | understand EdDSA keys and rotation, access claims, refresh rotation, grace window and reuse detection, revocation paths | explanation |
 | [architecture/service-auth.md](./architecture/service-auth.md) | understand client credentials, scopes, the service guard, onboarding a service client | explanation |
-| [architecture/infrastructure.md](./architecture/infrastructure.md) | look up env vars, logging and redaction, error envelope, request id, health, shutdown, rate limits | reference |
+| [architecture/infrastructure.md](./architecture/infrastructure.md) | look up env vars (built vs planned), logging, redaction and metrics, error envelope, request id, health, shutdown, rate limits, idempotency | reference |
 | [architecture/future.md](./architecture/future.md) | see deferred work (events, MFA and admin provisioning, PII erasure, social login, email change, AI service client) | explanation |
 
 **Source of truth for the API is [`contracts/openapi.yaml`](../contracts/openapi.yaml).**
 `architecture/api.md` mirrors it; when they disagree the contract wins and the prose is stale.
 Binding rules are in `CLAUDE.md`; when `CLAUDE.md` and the contract disagree, the contract wins and
-the discrepancy is flagged. The 2026-09-15 baseline's `CLAUDE.md` edits are applied; its **contract changes are
-approved but not yet applied** — see [design-baseline.md](./architecture/design-baseline.md) section 4.
+the discrepancy is flagged. The 2026-09-15 baseline's `CLAUDE.md` edits are applied. Of its **contract changes**,
+the health split (item 7) is applied and built (`foundation`, 2026-09-16); the auth and users changes are
+approved but not yet applied — see [design-baseline.md](./architecture/design-baseline.md) section 4.
+
+**As built (2026-09-16):** only the `foundation` module exists — entrypoints, `src/lib/` cross-cutting pieces, the
+health probes, the `citext` migration, the worker loop, Docker, and CI ([foundation/spec.md](./foundation/spec.md)
+§15). Shards mark what is built versus planned.
 
 Decisions: [adr/](./adr/) — 0001 no ORM · 0002 asymmetric JWT + rotating refresh · 0003 argon2id ·
 0004 rejected accounts can sign in · 0005 refresh grace window · 0006 email-first registration ·
 0007 outbox + worker · 0008 Redis Tier 2 fallback limiter · 0009 availability and recovery targets ·
 0010 manual admin provisioning and role policies · 0011 PII retained on soft delete ·
-0012 doctor status only via Care · 0013 log-derived metrics · 0014 health liveness/readiness.
+0012 doctor status only via Care · 0013 log-derived metrics · 0014 health liveness/readiness ·
+0015 foundation runtime dependencies.
 Platform decisions from this design live in the hub: ADR 0005 single-origin edge, 0006 doctor status via Care,
 0007 managed container platform.
 

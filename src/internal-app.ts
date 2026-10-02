@@ -5,6 +5,7 @@ import { errorHandler, notFoundHandler } from "./lib/error/errorHandler";
 import { buildInternalRouter } from "./internal-routes";
 import { inflightTracker } from "./lib/lifecycle/inflight";
 import { requestLogger } from "./lib/logger/request-logger";
+import { assertRoutesAuthorized } from "./lib/rbac/assert-routes-authorized";
 import { requestId } from "./lib/request-id/request-id";
 import type { InternalAppOptions } from "./types";
 
@@ -23,10 +24,14 @@ export function createInternalApp(options?: InternalAppOptions): Express {
   app.use(helmet({ hsts: false }));
   app.use(express.json({ limit: JSON_BODY_LIMIT, strict: true, type: "application/json" }));
 
-  app.use("/internal", buildInternalRouter(options?.scope));
+  const internalRouter = buildInternalRouter(options?.scope);
+  app.use("/internal", internalRouter);
   if (options?.extraInternalRouter) {
     app.use("/internal", options.extraInternalRouter);
   }
+
+  // Fail closed at boot, exactly as on the public listener (BR-27).
+  assertRoutesAuthorized(internalRouter, "/internal");
 
   app.use(notFoundHandler);
   app.use(errorHandler);

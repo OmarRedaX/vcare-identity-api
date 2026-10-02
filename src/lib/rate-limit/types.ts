@@ -4,12 +4,16 @@ import type { Logger } from "../logger/logger";
 
 export type DegradeMode = "fallback" | "fail-open";
 
-export interface RateLimitOptions {
+/** A limiter without a subject: usable from a service through `consumeRateLimit` (spec §5.3). */
+export interface SlidingWindowOptions {
   name: string;
   limit: number;
   windowMs: number;
-  subject: (req: Request) => string;
   degrade: DegradeMode;
+}
+
+export interface RateLimitOptions extends SlidingWindowOptions {
+  subject: (req: Request) => string;
 }
 
 export interface RateLimitDeps {

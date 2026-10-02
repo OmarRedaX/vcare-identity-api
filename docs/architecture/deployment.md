@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: accepted
 diataxis: explanation
-last_verified: 2026-09-15
+last_verified: 2026-09-16
 tags: [architecture, runtime, scaling, slo, disaster-recovery, bottlenecks, observability]
 related: [system-design, design-baseline, capacity, overview, infrastructure, runbook, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0009-availability-and-recovery-targets, adr-0013-log-derived-metrics, adr-0014-health-liveness-readiness-split, hub-deployment]
 ---
@@ -29,7 +29,13 @@ replica (Tier 2).
 |---|---|---|---|---|
 | `identity-api` | one image, `node dist/server.js` (both listeners) | min 2, max 6, spread across AZs | target CPU 60 %; step on login p95 > 200 ms | LB: `/api/health/ready` and `/internal/health/ready`; orchestrator: `/api/health/live` |
 | `identity-worker` | same image, `node dist/worker.js` | 1 (2 when outbox lag alert fires repeatedly) | manual | orchestrator: process liveness |
-| `identity-migrate` | same image, `node dist/migrate.js` | one-off per release | — | exit code |
+| `identity-migrate` | same image, `node dist/migrate.js latest` (a bare `node dist/migrate.js` exits 1) | one-off per release | — | exit code |
+
+The image (as built, `Dockerfile`) is `node:24-alpine`, runs as the non-root `node` user, exposes 3000 and 3100,
+defaults to `node dist/server.js`, and has no `HEALTHCHECK` (the orchestrator probes HTTP). Container settings
+the tasks need: `INTERNAL_HOST` set to the task's private interface (the default `127.0.0.1` would make the
+internal LB and `/internal/health/ready` unreachable), and `TRUST_PROXY_HOPS` equal to the proxy hops in front of
+the task (hub `deployment.md` → edge path) so rate-limit subjects use the real client IP.
 
 Network rules: the public LB target group exposes only `:3000`; `:3100` is reachable only through the
 internal LB from care-api's security group (and future registered service clients); Postgres and Redis
@@ -86,6 +92,9 @@ Signing-key and client-secret rotations follow [runbook.md](../runbook.md) and a
 embedded metric format** (e.g. CloudWatch EMF) — no new dependency. `X-Request-Id` links Care and Identity
 logs; `user_status_changes.request_id` persists it for status changes.
 
+As built (2026-09-16), `logger.metric()` exists and emits `rate_limited` and `rate_limiter_degraded`; the other
+metrics below arrive with their modules.
+
 | Metric | Dimensions | Used by |
 |---|---|---|
 | `http_requests` count, `http_latency_ms` (p50/p95/p99), `http_errors` by `code` | `route`, `status` | RED dashboards, latency SLO alerts |
@@ -116,7 +125,10 @@ the 99.95 % budget at > 2× rate over 1 h).
 | `WORKER_BATCH_SIZE` | no | `20` | jobs claimed per poll |
 | `OUTBOX_MAX_ATTEMPTS` | no | `8` | attempts before `dead` |
 
-All go into `src/lib/config/env.ts` (zod) when the modules are built; secrets have no defaults.
+All go into the zod env schema (`src/lib/config/env.schema.ts`) when the modules are built; secrets have no
+defaults. As of 2026-09-16 the `foundation` module has added `RATE_LIMIT_FALLBACK_DIVISOR` and
+`WORKER_POLL_INTERVAL_MS` from this table, plus `TRUST_PROXY_HOPS` (default `0`), `SHUTDOWN_TIMEOUT_MS`, and the
+base variables. Full list and status per variable: [infrastructure.md](./infrastructure.md) → Environment variables.
 
 ## 7. Deferred
 

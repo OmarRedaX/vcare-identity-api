@@ -6,7 +6,7 @@ module: auth
 status: ready
 version: 1.1.0
 diataxis: reference
-last_verified: 2026-09-17
+last_verified: 2026-10-02
 tags: [spec, auth, registration, login, refresh-token, jwks, rbac, password, outbox, email, worker]
 related: [auth-brainstorm, auth-tasks, users-brainstorm, foundation-spec, auth-tokens, data-model, infrastructure, design-baseline, overview, adr-0002-asymmetric-jwt-rotating-refresh, adr-0003-argon2id-password-hashing, adr-0004-rejected-doctors-can-sign-in, adr-0005-refresh-reuse-grace-window, adr-0006-email-first-registration-otp, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0010-manual-admin-provisioning-role-policies, adr-0011-pii-retained-on-soft-delete, adr-0015-foundation-runtime-dependencies]
 contracts: [contracts/openapi.yaml]
@@ -805,9 +805,10 @@ Query count on success: 1 lookup + 3 statements in the tx (lock, user read, inse
   These are **constants, not env variables**: the contract fixes them (`iss`, `aud`, `expiresIn: 900`,
   `Max-Age=2592000`), so making them configurable could only break conformance (doc fix 12.2).
 - `keys.ts`: `loadSigningKeys(env): SigningKeySet` — for each `{ kid, privateJwk }` in `JWT_PRIVATE_KEYS`:
-  `importJWK(privateJwk, "EdDSA")` for signing and `importJWK({ kty, crv, x }, "EdDSA")` for verifying; asserts the
+  `crypto.createPrivateKey({ key: privateJwk, format: "jwk" })` for signing and `crypto.createPublicKey({ key: { kty, crv,
+  x }, format: "jwk" })` for verifying, each converted with `.toCryptoKey("Ed25519", false, [usage])`; asserts the
   public `x` derived from `d` equals the given `x` (via `crypto.createPublicKey`). `SigningKeySet` = `{ activeKid,
-  signingKey, verifyKeys: Map<kid, KeyLike>, publicJwks: readonly Jwk[] }`, frozen. Any failure throws
+  signingKey, verifyKeys: Map<kid, CryptoKey>, publicJwks: readonly Jwk[] }`, frozen. Any failure throws
   `EnvRequirementError(["JWT_PRIVATE_KEYS"])` at API boot (the message never includes key material).
 - `jwt.ts`:
   - `TokenSigner.signUserToken(user: { id, role, status, emailVerifiedAt }): Promise<string>` →

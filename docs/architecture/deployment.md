@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: accepted
 diataxis: explanation
-last_verified: 2026-09-16
+last_verified: 2026-10-02
 tags: [architecture, runtime, scaling, slo, disaster-recovery, bottlenecks, observability]
 related: [system-design, design-baseline, capacity, overview, infrastructure, runbook, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0009-availability-and-recovery-targets, adr-0013-log-derived-metrics, adr-0014-health-liveness-readiness-split, hub-deployment]
 ---
@@ -80,7 +80,7 @@ Signing-key and client-secret rotations follow [runbook.md](../runbook.md) and a
 | 3 | **`refresh_tokens` churn** (160 k inserts + updates/day, 5–10 M rows) | table/index bloat, autovacuum lag, slower refresh p95 | worker purge in **batches of 5 k rows with sleeps** under an advisory lock; partial indexes on live rows keep hot paths small | per-table autovacuum tuning (`autovacuum_vacuum_scale_factor=0.02`, `autovacuum_analyze_scale_factor=0.01`); monitor dead tuples; at 10× adopt monthly partitions (new ADR) |
 | 4 | **Postgres connections and failover** | pool exhaustion under load; Multi-AZ failover drops connections ~60 s | pool per task (`DATABASE_POOL_MAX`), 2 s statement timeout, fast-fail on pool wait > 1 s, reconnect; retries only for idempotent reads | no connection proxy at this scale (add one past ~10 tasks); quarterly failover drill; alert on pool wait time |
 | 5 | **`/internal/users` fan-in** from Care search spikes | cache misses in Care hit Identity together | single `= ANY($1)` PK query, ≤ 100 ids, no outbound calls, no Redis on the path | Care's 300 s cache absorbs ~80 %; internal LB isolates internal traffic from public; alert `InternalUsersLatencyHigh` |
-| 6 | **JWKS availability** | if Care can't fetch keys for > 5 min, every Care request fails | JWKS built once at boot, served from memory | edge caches `/.well-known/jwks.json` (`max-age=300`); synthetic probe alert `JwksUnavailable`; JWKS survives origin blips from edge cache |
+| 6 | **JWKS availability** | Care re-fetches the key set every 5 min; if it can't for > 1 h (its stale-if-error cap), every Care request fails — and a token signed with a new `kid` fails as soon as the outage starts | JWKS built once at boot, served from memory | edge caches `/.well-known/jwks.json` (`max-age=300`); synthetic probe alert `JwksUnavailable`; JWKS survives origin blips from edge cache |
 | 7 | **Outbox lag / email provider slowness** | registration codes arrive late (10 min TTL) and users abandon sign-up | claim 20 jobs with `FOR UPDATE SKIP LOCKED`; provider call timeout 5 s; exponential backoff; `dead` after 8 attempts; code TTL starts **at send time** | alert when oldest pending job > 2 min; scale worker to 2; secondary email provider is a follow-up |
 | 8 | **Deploys and migrations** | a breaking migration mid-rollout causes 500s on old tasks | expand → migrate → contract; migrations reviewed with the `write-migration` skill | migration task before rollout; rolling deploy with 100 % min healthy; rollback = previous task definition |
 | 9 | **Redis failover** | brief loss of shared limits and idempotency | per-instance fallback limiter (stricter), DB constraints for duplicate registration (ADR 0008) | managed Redis with replica + automatic failover; alert `RateLimiterDegraded` |

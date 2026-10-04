@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: identity
       POSTGRES_DB: vcare_identity
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - identity-pg:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -20,7 +20,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -30,6 +30,7 @@ services:
     build: .
     command: ["node", "dist/migrate.js", "latest"]
     environment:
+      NODE_ENV: development
       DATABASE_URL: postgres://identity:identity@postgres:5432/vcare_identity
       REDIS_URL: redis://redis:6379
     depends_on:
@@ -41,8 +42,8 @@ services:
     build: .
     init: true
     ports:
-      - "3000:3000"
-      - "3100:3100"
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3100:3100"
     environment:
       NODE_ENV: development
       DATABASE_URL: postgres://identity:identity@postgres:5432/vcare_identity
@@ -51,6 +52,11 @@ services:
       INTERNAL_HOST: 0.0.0.0
       CORS_ORIGINS: http://localhost:5173
       LOG_LEVEL: info
+      # Dev-only auth configuration. The signing key is never committed: it comes from your untracked .env
+      # (`npm run keys:generate`), which compose reads automatically.
+      JWT_PRIVATE_KEYS: ${JWT_PRIVATE_KEYS:?set JWT_PRIVATE_KEYS in .env (npm run keys:generate)}
+      JWT_ACTIVE_KID: ${JWT_ACTIVE_KID:-}
+      OTP_PEPPER: local-development-otp-pepper-change-me
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -62,8 +68,15 @@ services:
     init: true
     command: ["node", "dist/worker.js"]
     environment:
+      NODE_ENV: development
       DATABASE_URL: postgres://identity:identity@postgres:5432/vcare_identity
       REDIS_URL: redis://redis:6379
+      OTP_PEPPER: local-development-otp-pepper-change-me
+      APP_BASE_URL: http://localhost:5173
+      EMAIL_PROVIDER: capture
+      # /app is root-owned in the image; capture to a writable path.
+      EMAIL_CAPTURE_DIR: /tmp/mail
+      EMAIL_PROVIDER_FROM: no-reply@example.test
     depends_on:
       migrate:
         condition: service_completed_successfully

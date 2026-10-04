@@ -75,3 +75,17 @@ describe("pingRedis", () => {
     await expect(pingRedis(client, 10)).resolves.toBe("down");
   });
 });
+
+describe("createRedis resilience options", () => {
+  it("should not resend unfulfilled commands and should time out silent connections", () => {
+    const client = createRedis("redis://127.0.0.1:1");
+
+    try {
+      expect(client.options.autoResendUnfulfilledCommands).toBe(false);
+      expect(client.options.commandTimeout).toBe(200);
+      expect(client.options.keepAlive).toBe(10_000);
+    } finally {
+      client.disconnect();
+    }
+  });
+});

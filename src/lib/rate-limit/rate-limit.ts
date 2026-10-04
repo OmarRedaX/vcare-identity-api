@@ -5,7 +5,8 @@ import { env } from "../config/env";
 import { RateLimited } from "../error/errors";
 import { captureRoute } from "../http/route-capture";
 import { logger as defaultLogger } from "../logger/logger";
-import { isRedisReady, redis as defaultRedis, withTimeout } from "../redis/redis";
+import { redis as defaultRedis } from "../redis/redis";
+import { guardedRedisCall, redisUsable } from "../redis/redis-guard";
 import { InProcessLimiter } from "./in-process-limiter";
 import { SLIDING_WINDOW_SCRIPT } from "./sliding-window.lua";
 import type { RateLimitDecision, RateLimitDeps, RateLimitOptions, SlidingWindowOptions } from "./types";
@@ -43,7 +44,8 @@ async function callScript(
     member: string,
   ) => Promise<unknown>;
 
-  const raw = await withTimeout(
+  const raw = await guardedRedisCall(
+    client,
     command.call(client, key, String(limit), String(windowMs), randomUUID()),
     RATE_LIMIT_REDIS_TIMEOUT_MS,
   );
@@ -84,12 +86,13 @@ function degradedDecision(
     return { allowed: true, retryAfterSeconds: 0 };
   }
   logDegraded(options.name, "fallback", deps);
-  return processLimiter.hit(
+  const decision = processLimiter.hit(
     key,
     fallbackLimit(options.limit, deps.fallbackDivisor),
     options.windowMs,
     deps.now(),
   );
+  return decision.allowed ? decision : { ...decision, degraded: true };
 }
 
 /**
@@ -105,7 +108,7 @@ export async function consumeRateLimit(
   const resolved = deps ?? defaultDeps();
   const key = `rl:${options.name}:${subject}`;
 
-  if (!isRedisReady(resolved.redis)) {
+  if (!redisUsable(resolved.redis)) {
     return degradedDecision(options, key, resolved);
   }
 
@@ -147,7 +150,7 @@ export function rateLimit(options: RateLimitOptions, deps?: RateLimitDeps): Requ
           return;
         }
         res.setHeader("Retry-After", String(Math.max(1, decision.retryAfterSeconds)));
-        logRateLimited(options.name, !isRedisReady(resolved.redis), resolved);
+        logRateLimited(options.name, decision.degraded === true, resolved);
         next(RateLimited);
       },
       () => {

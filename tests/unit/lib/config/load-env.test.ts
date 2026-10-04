@@ -79,3 +79,22 @@ describe("loadEnv", () => {
     expect(keysOf({ ...VALID, DATABASE_URL: "http://localhost:5432/db" })).toContain("DATABASE_URL");
   });
 });
+
+describe("loadEnv trust proxy", () => {
+  const PRODUCTION = { ...VALID, NODE_ENV: "production", EMAIL_PROVIDER_BASE_URL: "https://api.resend.com" };
+
+  it("should reject TRUST_PROXY_HOPS when it is unset and NODE_ENV is production", () => {
+    expect(keysOf(PRODUCTION)).toContain("TRUST_PROXY_HOPS");
+  });
+
+  it("should reject TRUST_PROXY_HOPS when it is 0 and NODE_ENV is production", () => {
+    expect(keysOf({ ...PRODUCTION, TRUST_PROXY_HOPS: "0" })).toContain("TRUST_PROXY_HOPS");
+  });
+
+  it("should accept an explicit hop count and default the internal listener to 0 when in production", () => {
+    const env = loadEnv({ ...PRODUCTION, TRUST_PROXY_HOPS: "2" });
+
+    expect(env.TRUST_PROXY_HOPS).toBe(2);
+    expect(env.INTERNAL_TRUST_PROXY_HOPS).toBe(0);
+  });
+});

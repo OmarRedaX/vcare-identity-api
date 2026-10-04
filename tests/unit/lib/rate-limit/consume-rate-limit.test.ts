@@ -135,3 +135,17 @@ describe("consumeRateLimit", () => {
     expect(sink.text()).not.toContain(FAMILY);
   });
 });
+
+describe("consumeRateLimit degraded flag", () => {
+  it("should flag a fallback denial as degraded when the Redis script times out on a ready client", async () => {
+    const sink = logSink();
+    const redis = fakeRedis("ready", () => new Promise(() => undefined));
+    const decisions = [];
+    for (let i = 0; i < 4; i += 1) {
+      decisions.push(await consumeRateLimit(CREDENTIAL_LIMITER, "subject-degraded", deps(redis.client, sink.logger)));
+    }
+
+    const denied = decisions.find((decision) => !decision.allowed);
+    expect(denied?.degraded).toBe(true);
+  });
+});

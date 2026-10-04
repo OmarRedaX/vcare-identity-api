@@ -6,7 +6,7 @@ module: foundation
 status: implemented
 version: 1.1.0
 diataxis: reference
-last_verified: 2026-09-16
+last_verified: 2026-10-04
 tags: [spec, foundation, bootstrap, infrastructure, health, idempotency, rate-limit, logging, testing, ci, docker]
 related: [foundation-brainstorm, foundation-tasks, foundation-manual-qa, adr-0015-foundation-runtime-dependencies, infrastructure, deployment, overview, quickstart, design-baseline, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0013-log-derived-metrics, adr-0014-health-liveness-readiness-split]
 contracts: [contracts/openapi.yaml]
@@ -485,14 +485,14 @@ once per 10 s), `redis_reconnecting` (`debug`).
 | 3 | Header present, not a UUID (or repeated header) | `400 ValidationFailed`, details `[{ field: "Idempotency-Key", issue: "must be a UUID" }]` |
 | 4 | `isRedisReady()` is false | skip: `warn` `idempotency_skipped` `{ reason: "redis_unavailable" }`; `next()` (ADR 0008 — DB constraints stop duplicates) |
 | 5 | `SET key <in_flight record> NX PX 60000` succeeds | run handler; capture body by wrapping `res.json` (and `res.send` for non-JSON; `null` for 204) |
-| 5a | …handler finishes with status < 500 | `SET key <completed record {status, body}> PX 86400000` (fire-and-forget; failure → `warn` `idempotency_store_failed`, response unaffected) |
-| 5b | …handler finishes with status ≥ 500 | `DEL key` so a retry re-executes |
+| 5a | …handler finishes with status < 500 and ≠ 429 | `SET key <completed record {status, body}> PX 86400000` (fire-and-forget; failure → `warn` `idempotency_store_failed`, response unaffected) |
+| 5b | …handler finishes with status ≥ 500 **or 429** (a transient refusal such as `HashQueueFull`, never replayed) | `DEL key` so a retry re-executes |
 | 5c | …client disconnects before `finish` | `DEL key` |
 | 6 | `SET NX` fails; stored `bodyHash` ≠ request hash (any state) | `422 IdempotencyConflict` |
 | 7 | `SET NX` fails; same hash, `state: "completed"` | replay: `res.status(stored.status)`; body `null` → `end()`, else `json(stored.body)`; if the stored body is an error envelope, `error.requestId` is replaced with the current request id; the handler does **not** run |
 | 8 | `SET NX` fails; same hash, `state: "in_flight"` (concurrent same key) | `409 Conflict` via `IdempotencyInProgress`, header `Retry-After: 1`; the handler does **not** run |
 | 9 | `SET NX` fails but `GET` returns nothing (expired in between) | retry step 5 once; if it fails again, behave as row 8 |
-| 10 | Any Redis command before the handler errors or exceeds 100 ms | skip as row 4 with `reason: "redis_error"` |
+| 10 | Any Redis command before the handler errors or exceeds 100 ms | skip as row 4 with `reason: "redis_error"`. A claim `SET NX` that times out may still land later: the record carries a random `nonce`, and when the late `SET` resolves `"OK"` a compare-and-delete Lua script removes exactly that payload, so a later same-key retry is not answered `409`. The Redis client sets `autoResendUnfulfilledCommands: false` so a reconnect never replays an abandoned command |
 | 11 | Stored value unparsable / wrong `v` | `DEL key`, then continue as row 5 |
 
 Response headers are not stored or replayed (only status and body). No request body or key value is logged.
@@ -1163,7 +1163,7 @@ integration suites (55 passed, 2 signal-based cases skipped on Windows and run o
 - **`INTERNAL_HOST` defaults to `127.0.0.1`.** Right for local runs; in a container the internal load balancer
   cannot reach `/internal/*` or `/internal/health/ready` unless the task sets `INTERNAL_HOST` to its private
   interface address (dev compose sets `0.0.0.0`). Recorded in `architecture/deployment.md` → New configuration.
-- No `/review-code foundation` has run yet (no `reviews/` folder).
+- `/review-code foundation` ran 2026-09-26; its findings were fixed 2026-10-04 (see §15.5).
 
 ### 15.4 Docs reconciled (§12)
 `architecture/infrastructure.md`, `architecture/overview.md`, `architecture/api.md`, `architecture/deployment.md`,
@@ -1176,3 +1176,27 @@ integration suites (55 passed, 2 signal-based cases skipped on Windows and run o
   `no-store.ts`, `client-ip.ts`) is already listed. Left for a human edit (docs updater does not change `CLAUDE.md`).
 - **Care parity** (§12 checklist): not re-verified against care-service code in this run; Care's foundation spec is
   still `status: ready`.
+
+### 15.5 Post-review amendments (2026-10-04, `/develop foundation --fix-review`)
+
+These amend the sections named; where they differ from §§1-14, this section wins.
+
+| Review finding | Amendment | Where |
+|---|---|---|
+| Idempotency stored `429` | §4.12 rows 5a/5b: `429` and `>= 500` delete the record | `lib/idempotency/idempotency.ts` |
+| Keep-alive drain at shutdown | §4.17 step 3 / §4.18: once shutting down, `inflightTracker` sets `Connection: close` on new responses and ends the socket when a request finishes, so `server.close()` completes; closing pools is bounded by the remaining `SHUTDOWN_TIMEOUT_MS` (`pkg/utils/promise.ts` `withDeadline`) | `lib/lifecycle/inflight.ts`, `server.ts`, `worker.ts` |
+| Orphaned in-flight claim | §4.12 row 10 and §4.11: `nonce` + compare-and-delete; `autoResendUnfulfilledCommands: false`; `commandTimeout: 200`; `keepAlive: 10000` | `lib/idempotency/*`, `lib/redis/redis.ts` |
+| `TRUST_PROXY_HOPS` | §4.2: unset allowed outside production (`0`), **required and >= 1 in production**; new `INTERNAL_TRUST_PROXY_HOPS` (default `0`) applied by `createInternalApp` | `lib/config/env.schema.ts`, `internal-app.ts` |
+| Raw error text in logs | §4.4 row 8 / §4.6: non-`AppError` errors log `name`, `code`, `message = error:<name>` (`pg_error:<SQLSTATE>` for driver errors, plus `constraint/table/column/routine`) and stack **frames only** (no header line); `AppError` messages stay verbatim. The headers-sent branch logs once and destroys the response instead of calling `next(err)` | `lib/logger/redact.ts`, `lib/error/errorHandler.ts` |
+| Readiness vs pool saturation | §3.2 / §4.16: the probe uses a dedicated single-connection Knex pool (`probeDb`, token `ProbeDb`, 1 s statement timeout); tests that override only `db` also override the probe | `lib/knex/knex.ts`, `bootstrap.ts`, `health.service.ts` |
+| Client-side Postgres bounds | §4.10: `connectionTimeoutMillis: 2000`, `query_timeout = statement_timeout + 1000` (request pool only), TCP `keepAlive` (10 s initial delay), `pool.createTimeoutMillis: 2000` | `lib/knex/knexfile.ts` |
+| `OPTIONS` | §3.4: `OPTIONS` that is not a dev CORS preflight is `404 NotFound` (envelope) on both listeners | `lib/http/reject-options.ts` |
+| `rate_limited.degraded` | §4.13 row 3: `RateLimitDecision.degraded` is set when the in-process fallback denied; the log reports it | `lib/rate-limit/*` |
+| 499 `requestId` | §4.6: the request logger captures `req.requestId` on entry | `lib/logger/request-logger.ts` |
+| Forged cursor | §11.3: `decodeCursor(cursor, "iso-timestamp" \| "string" \| "number")` validates the sort value | `lib/http/pagination/cursor.ts` |
+| stderr paths | §4.17: both entrypoints log one JSON `boot_failed` line and exit 1 | `server.ts`, `worker.ts` |
+| Migration names | §4.10: names are recorded without the file extension (`buildMigrationSource`). **One-time step for an existing dev database:** `UPDATE knex_migrations SET name = regexp_replace(name, '\.(ts\|js)$', '');` | `lib/knex/knexfile.ts` |
+| Redis silent socket | §4.11: `commandTimeout: 200`, `keepAlive: 10000`. As built (2026-10-04): a per-client circuit breaker (`lib/redis/circuit-breaker.ts`, registry and `redisUsable` / `guardedRedisCall` in `lib/redis/redis-guard.ts`) opens after `REDIS_BREAKER_FAILURE_THRESHOLD` (5) consecutive command timeouts/errors within `REDIS_BREAKER_WINDOW_MS` (10 s), refuses Redis for `REDIS_BREAKER_COOLDOWN_MS` (15 s), then admits one half-open probe (success closes, failure re-opens). The rate limiter and idempotency middleware use it, so an open breaker takes the existing ADR 0008 paths immediately; readiness is unaffected | `lib/redis/redis.ts`, `lib/redis/circuit-breaker.ts`, `lib/redis/redis-guard.ts` |
+| Packaging | §7: every published port is bound to `127.0.0.1`; runtime image files are root-owned (no `--chown`), `USER node`; the dev stack carries dev-only auth/worker variables (the signing key comes from the untracked `.env`) | `docker-compose*.yml`, `Dockerfile` |
+| Contract tests | `contractOperation(path, method)` reads declared statuses, inline headers and `x-error-codes`; `ERROR_CODES` (`lib/error/error-codes.ts`) is asserted equal to the contract enum | `tests/helpers/contract.ts`, `tests/integration/health.test.ts` |
+| Contract | `error.details` is required; health operations declare `500 InternalError`; `HealthLive`/`HealthStatus` have `additionalProperties: false`; `CacheControlNoStore` is generic | `contracts/openapi.yaml` |

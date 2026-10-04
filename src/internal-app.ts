@@ -3,6 +3,7 @@ import helmet from "helmet";
 import { env } from "./lib/config/env";
 import { errorHandler, notFoundHandler } from "./lib/error/errorHandler";
 import { buildInternalRouter } from "./internal-routes";
+import { rejectOptions } from "./lib/http/reject-options";
 import { inflightTracker } from "./lib/lifecycle/inflight";
 import { requestLogger } from "./lib/logger/request-logger";
 import { assertRoutesAuthorized } from "./lib/rbac/assert-routes-authorized";
@@ -16,12 +17,13 @@ export function createInternalApp(options?: InternalAppOptions): Express {
   const app = express();
 
   app.disable("x-powered-by");
-  app.set("trust proxy", env.TRUST_PROXY_HOPS);
+  app.set("trust proxy", env.INTERNAL_TRUST_PROXY_HOPS);
 
   app.use(inflightTracker());
   app.use(requestId());
   app.use(requestLogger());
   app.use(helmet({ hsts: false }));
+  app.use(rejectOptions());
   app.use(express.json({ limit: JSON_BODY_LIMIT, strict: true, type: "application/json" }));
 
   const internalRouter = buildInternalRouter(options?.scope);

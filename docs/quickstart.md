@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: tutorial
-last_verified: 2026-09-16
+last_verified: 2026-10-04
 tags: [tutorial, getting-started, local-dev, curl, docker, tests]
 related: [infrastructure, api, auth-tokens, design-baseline, foundation-spec, foundation-manual-qa]
 ---
@@ -38,6 +38,7 @@ PORT=3000
 INTERNAL_PORT=3100
 INTERNAL_HOST=127.0.0.1
 TRUST_PROXY_HOPS=0
+INTERNAL_TRUST_PROXY_HOPS=0
 DATABASE_URL=postgres://identity:identity@localhost:5432/vcare_identity
 DATABASE_POOL_MAX=10
 REDIS_URL=redis://localhost:6379
@@ -200,3 +201,15 @@ Now send your **user** token to the same route — expect `401 ServiceTokenRequi
   [contracts/openapi.yaml](../contracts/openapi.yaml)
 - How tokens work → [architecture/auth-tokens.md](./architecture/auth-tokens.md)
 - Env and operations → [architecture/infrastructure.md](./architecture/infrastructure.md), [runbook.md](./runbook.md)
+
+## Migration names changed (2026-10-04)
+
+Migrations are now recorded without a file extension so `node dist/migrate.js` and `npm run migrate` share one
+`knex_migrations` table. A dev database migrated earlier needs this one-time fix (production has none yet):
+
+```sql
+UPDATE knex_migrations SET name = regexp_replace(name, '\.(ts|js)$', '');
+```
+
+The dev compose stack reads `JWT_PRIVATE_KEYS` from your untracked `.env` (`npm run keys:generate`) and binds all
+ports to `127.0.0.1`.

@@ -3,7 +3,7 @@ title: Identity Service — Docs Index
 owner: identity-team
 service: identity-service
 status: draft
-last_verified: 2026-09-18
+last_verified: 2026-10-04
 tags: [index, router, identity]
 related: [service-card, system-design, runbook, quickstart]
 ---

@@ -26,4 +26,6 @@ export interface RateLimitDeps {
 export interface RateLimitDecision {
   allowed: boolean;
   retryAfterSeconds: number;
+  /** True when the in-process fallback limiter decided (Redis down or its script timed out). */
+  degraded?: boolean;
 }

@@ -1,0 +1,22 @@
+/** Mirrors the contract's ErrorCode enum; a test asserts equality with contracts/openapi.yaml. */
+export const ERROR_CODES = [
+  "ValidationFailed",
+  "Unauthorized",
+  "TokenExpired",
+  "InvalidCredentials",
+  "RefreshTokenInvalid",
+  "RefreshTokenReused",
+  "EmailNotVerified",
+  "AccountPending",
+  "AccountSuspended",
+  "AccountRejected",
+  "Forbidden",
+  "ServiceTokenRequired",
+  "InsufficientScope",
+  "NotFound",
+  "Conflict",
+  "InvalidStatusTransition",
+  "IdempotencyConflict",
+  "RateLimited",
+  "InternalError",
+] as const;

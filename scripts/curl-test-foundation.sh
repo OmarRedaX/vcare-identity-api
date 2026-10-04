@@ -17,6 +17,8 @@ PUBLIC_URL="${PUBLIC_URL:-http://localhost:3020}"
 INTERNAL_URL="${INTERNAL_URL:-http://localhost:3120}"
 CORS_ORIGIN="${CORS_ORIGIN:-http://localhost:5173}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.test.yml}"
+# Full compose argument string; override for the dev stack, e.g. COMPOSE_ARGS="-f docker-compose.yml -f override.yml"
+COMPOSE_ARGS="${COMPOSE_ARGS:--f $COMPOSE_FILE}"
 RUN_INFRA_CASES="${RUN_INFRA_CASES:-0}"
 
 PASS=0
@@ -58,14 +60,15 @@ section() { printf "\n=== %s ===\n" "$1"; }
 
 # ---------------------------------------------------------------------------
 section "Preflight"
-status="$(call GET "$PUBLIC_URL/api/health/live")"
+status="$(call GET "$PUBLIC_URL/api/health/live")" || true
 if [ "$status" != "200" ]; then
   echo "Server not reachable at $PUBLIC_URL (got $status). Start it with:"
   echo "  docker compose -f $COMPOSE_FILE up -d --wait"
   echo "  NODE_ENV=development PORT=3020 INTERNAL_PORT=3120 INTERNAL_HOST=127.0.0.1 \\"
   echo "    DATABASE_URL=postgres://identity:identity@localhost:5435/vcare_identity_test \\"
   echo "    REDIS_URL=redis://localhost:6382/1 npx tsx src/migrate.ts latest"
-  echo "  ...then the same env with: npx tsx src/server.ts"
+  echo "  ...then the same env plus the auth variables (JWT_PRIVATE_KEYS from \`npm run keys:generate\`,"
+  echo "  OTP_PEPPER with >= 32 characters) with: npx tsx src/server.ts"
   exit 1
 fi
 echo "  public listener reachable at $PUBLIC_URL"
@@ -122,7 +125,15 @@ check "internal path on the PUBLIC listener -> 404" 404 "$(call GET "$PUBLIC_URL
 check "  envelope code" "NotFound" "$(sed -n 's/.*"code":"\([^"]*\)".*/\1/p' "$TMP/body")"
 check "api path on the INTERNAL listener -> 404" 404 "$(call GET "$INTERNAL_URL/api/health/live")"
 check "  envelope code" "NotFound" "$(sed -n 's/.*"code":"\([^"]*\)".*/\1/p' "$TMP/body")"
-check "/.well-known/jwks.json not in foundation -> 404" 404 "$(call GET "$PUBLIC_URL/.well-known/jwks.json")"
+check "/.well-known/jwks.json is served by the public listener -> 200" 200 "$(call GET "$PUBLIC_URL/.well-known/jwks.json")"
+check "/.well-known/jwks.json is NOT served by the internal listener -> 404" 404 "$(call GET "$INTERNAL_URL/.well-known/jwks.json")"
+
+section "C2. JWKS (bare JWK Set, cached)"
+check "GET /.well-known/jwks.json -> 200" 200 "$(call GET "$PUBLIC_URL/.well-known/jwks.json")"
+check "  Cache-Control" "public, max-age=300" "$(header Cache-Control)"
+check "  X-Request-Id present" "yes" "$([ -n "$(header X-Request-Id)" ] && echo yes || echo no)"
+check "  bare key set (not enveloped)" "ok"   "$(grep -q '^{"keys":\[' "$TMP/body" && ! grep -q '"success"' "$TMP/body" && echo ok || echo mismatch)"
+check "  Ed25519 public key only (no private 'd')" "ok"   "$(grep -q '"kty":"OKP"' "$TMP/body" && grep -q '"crv":"Ed25519"' "$TMP/body" && ! grep -q '"d":' "$TMP/body" && echo ok || echo mismatch)"
 
 # ---------------------------------------------------------------------------
 section "D. Error envelope"
@@ -133,6 +144,8 @@ check "unknown internal path -> 404" 404 "$(call GET "$INTERNAL_URL/internal/def
 check "root path -> 404" 404 "$(call GET "$PUBLIC_URL/")"
 check "POST on a GET-only path -> 404" 404 \
   "$(call POST "$PUBLIC_URL/api/health/live" -H "Content-Type: application/json" -d '{}')"
+check "OPTIONS on a known route -> 404 envelope (no framework 200)" 404 "$(call OPTIONS "$PUBLIC_URL/api/health/live")"
+check "OPTIONS on the internal listener -> 404" 404 "$(call OPTIONS "$INTERNAL_URL/internal/health/ready")"
 check "malformed JSON -> 400" 400 \
   "$(call POST "$PUBLIC_URL/api/health/live" -H "Content-Type: application/json" -d '{bad')"
 check "  code" "ValidationFailed" "$(sed -n 's/.*"code":"\([^"]*\)".*/\1/p' "$TMP/body")"
@@ -180,12 +193,12 @@ if [ "$RUN_INFRA_CASES" = "1" ]; then
     return 1
   }
   restore() {
-    docker compose -f "$COMPOSE_FILE" start redis postgres >/dev/null 2>&1 || true
+    docker compose $COMPOSE_ARGS start redis postgres >/dev/null 2>&1 || true
   }
   trap 'restore; rm -rf "$TMP"' EXIT
 
   section "G. Redis down -> degraded (Redis is Tier 2, ADR 0008)"
-  docker compose -f "$COMPOSE_FILE" stop redis >/dev/null
+  docker compose $COMPOSE_ARGS stop redis >/dev/null
   wait_for '"redis":"down"' 20 || true
   check "public readiness -> 200" 200 "$(call GET "$PUBLIC_URL/api/health/ready")"
   check "  body" '{"status":"degraded","checks":{"database":"up","redis":"down"}}' "$(cat "$TMP/body")"
@@ -194,13 +207,13 @@ if [ "$RUN_INFRA_CASES" = "1" ]; then
   check "liveness unaffected -> 200" 200 "$(call GET "$PUBLIC_URL/api/health/live")"
 
   section "H. Redis restored"
-  docker compose -f "$COMPOSE_FILE" start redis >/dev/null
+  docker compose $COMPOSE_ARGS start redis >/dev/null
   wait_for '"redis":"up"' 30 || true
   check "public readiness -> 200 ok" '{"status":"ok","checks":{"database":"up","redis":"up"}}' \
     "$(call GET "$PUBLIC_URL/api/health/ready" >/dev/null; cat "$TMP/body")"
 
   section "I. Postgres down -> 503 (Postgres is the only fatal dependency, ADR 0014)"
-  docker compose -f "$COMPOSE_FILE" stop postgres >/dev/null
+  docker compose $COMPOSE_ARGS stop postgres >/dev/null
   wait_for '"database":"down"' 20 || true
   check "public readiness -> 503" 503 "$(call GET "$PUBLIC_URL/api/health/ready")"
   check "  body" '{"status":"down","checks":{"database":"down","redis":"up"}}' "$(cat "$TMP/body")"
@@ -210,7 +223,7 @@ if [ "$RUN_INFRA_CASES" = "1" ]; then
   check "error envelope still served -> 404" 404 "$(call GET "$PUBLIC_URL/api/nope")"
 
   section "J. Postgres restored"
-  docker compose -f "$COMPOSE_FILE" start postgres >/dev/null
+  docker compose $COMPOSE_ARGS start postgres >/dev/null
   wait_for '"status":"ok"' 60 || true
   check "public readiness -> 200 ok" '{"status":"ok","checks":{"database":"up","redis":"up"}}' \
     "$(call GET "$PUBLIC_URL/api/health/ready" >/dev/null; cat "$TMP/body")"

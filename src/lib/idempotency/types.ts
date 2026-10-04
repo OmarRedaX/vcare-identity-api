@@ -14,6 +14,7 @@ export interface IdempotencyRecord {
   v: 1;
   state: "in_flight" | "completed";
   bodyHash: string;
+  nonce?: string;
   status?: number;
   body?: unknown;
 }

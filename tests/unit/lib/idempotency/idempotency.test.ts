@@ -20,6 +20,7 @@ interface FakeRedis {
   set: jest.Mock;
   get: jest.Mock;
   del: jest.Mock;
+  evalScript: jest.Mock;
 }
 
 interface LogSink {
@@ -81,8 +82,18 @@ function fakeRedis(options?: { status?: string; commandDelayMs?: number }): Fake
     return withDelay(1);
   });
 
-  const client = { status, set, get, del } as unknown as Redis;
-  return { client, store, set, get, del };
+  // Compare-and-delete used to remove an orphaned in-flight claim: (script, numKeys, key, expectedValue).
+  const evalScript = jest.fn((...args: unknown[]): Promise<number> => {
+    const [, , key, expected] = args as [string, number, string, string];
+    if (store.get(key) === expected) {
+      store.delete(key);
+      return Promise.resolve(1);
+    }
+    return Promise.resolve(0);
+  });
+
+  const client = { status, set, get, del, eval: evalScript } as unknown as Redis;
+  return { client, store, set, get, del, evalScript };
 }
 
 // Express recognises an error handler by its arity, so the unused fourth parameter has to stay.
@@ -193,6 +204,31 @@ describe("idempotency middleware", () => {
     expect(runs()).toBe(1);
     const line = log.lines().find((entry) => entry.message === "idempotency_skipped");
     expect(line?.reason).toBe("redis_error");
+  });
+
+  it("should remove its own in-flight record when a timed-out claim lands late", async () => {
+    const redis = fakeRedis({ commandDelayMs: 160 });
+    const { app } = buildApp({ redis: redis.client, logger: logSink().logger }, { required: true });
+
+    await request(app).post("/things").set("Idempotency-Key", KEY).send({ a: 1 });
+    await delay(250);
+
+    expect(redis.evalScript).toHaveBeenCalledTimes(1);
+    expect(redis.store.size).toBe(0);
+  });
+
+  it("should delete the record when the handler finishes with 429", async () => {
+    const redis = fakeRedis();
+    const throttled: RequestHandler = (_req, res) => {
+      res.status(429).json({ success: false });
+    };
+    const { app } = buildApp({ redis: redis.client, logger: logSink().logger }, { required: true }, throttled);
+
+    await request(app).post("/things").set("Idempotency-Key", KEY).send({ a: 1 });
+    await flush();
+
+    expect(redis.del).toHaveBeenCalledTimes(1);
+    expect(redis.store.size).toBe(0);
   });
 
   it("should store status and body when the handler finishes below 500", async () => {

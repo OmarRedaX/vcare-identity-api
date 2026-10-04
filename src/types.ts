@@ -12,6 +12,8 @@ import type { Clock } from "./lib/time/types";
 /** Tests replace infrastructure singletons; production passes nothing. */
 export interface DependencyOverrides {
   db?: Knex;
+  /** Readiness-probe connection; defaults to `db` when only `db` is overridden. */
+  probeDb?: Knex;
   redis?: Redis;
   logger?: Logger;
   lifecycle?: Lifecycle;

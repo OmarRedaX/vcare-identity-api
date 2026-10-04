@@ -52,6 +52,7 @@ jest.mock("node:http", () => {
 
 jest.mock("../../src/lib/knex/knex", () => ({
   db: { destroy: jest.fn(() => Promise.resolve()) },
+  probeDb: { destroy: jest.fn(() => Promise.resolve()) },
 }));
 
 jest.mock("../../src/lib/redis/redis", () => ({

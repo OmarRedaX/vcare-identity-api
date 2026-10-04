@@ -121,3 +121,28 @@ describe("requestLogger", () => {
     expect(lines()).toHaveLength(1);
   });
 });
+
+describe("requestLogger requestId", () => {
+  it("should keep the request id on the 499 line when the client disconnects outside the request context", () => {
+    const written: string[] = [];
+    const log = new Logger({
+      service: "identity-service",
+      level: "debug",
+      production: false,
+      sink: (line) => {
+        written.push(line);
+      },
+    });
+    const res = new EventEmitter() as EventEmitter & Response;
+    (res as unknown as { locals: Record<string, unknown> }).locals = { routePattern: "/api/things" };
+    (res as unknown as { statusCode: number }).statusCode = 200;
+    const req = { method: "GET", requestId: "11111111-2222-4222-8222-222222222222" } as unknown as Request;
+
+    requestLogger(log)(req, res, jest.fn());
+    res.emit("close");
+
+    const line = JSON.parse(written.join("").trim()) as Record<string, unknown>;
+    expect(line.status).toBe(499);
+    expect(line.requestId).toBe("11111111-2222-4222-8222-222222222222");
+  });
+});

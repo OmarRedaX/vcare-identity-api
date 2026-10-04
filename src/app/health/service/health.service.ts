@@ -15,7 +15,7 @@ const CHECK_TIMEOUT_MS = 500;
 @injectable()
 export class HealthService {
   constructor(
-    @inject(TOKENS.Db) private readonly db: Knex,
+    @inject(TOKENS.ProbeDb) private readonly db: Knex,
     @inject(TOKENS.Redis) private readonly redis: Redis,
     @inject(TOKENS.Lifecycle) private readonly lifecycle: Lifecycle,
     @inject(TOKENS.Logger) private readonly logger: Logger,

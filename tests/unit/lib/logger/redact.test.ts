@@ -59,8 +59,27 @@ describe("redact", () => {
   it("should omit the stack when the level does not include it", () => {
     const output = asRecord(asRecord(redact({ err: new Error("boom") }, false)).err);
 
-    expect(output.message).toBe("boom");
+    expect(output.message).toBe("error:Error");
     expect(output.stack).toBeUndefined();
+  });
+
+  it("should not log the message or stack header of an unknown error when it embeds a value", () => {
+    const err = new Error("db password=synthetic-value");
+    const output = JSON.stringify(redact({ err }, true));
+
+    expect(output).not.toContain("synthetic-value");
+  });
+
+  it("should replace a driver error message with its SQLSTATE when it carries the offending input", () => {
+    const err = Object.assign(
+      new Error('select "id" from "t" where "family_id" = $1 - invalid input syntax for type uuid: "person@example.test"'),
+      { code: "22P02", routine: "string_to_uuid" },
+    );
+    const output = asRecord(asRecord(redact({ err }, true)).err);
+
+    expect(output.message).toBe("pg_error:22P02");
+    expect(output.routine).toBe("string_to_uuid");
+    expect(JSON.stringify(output)).not.toContain("person@example.test");
   });
 
   it("should replace a circular reference with a marker when redacting", () => {

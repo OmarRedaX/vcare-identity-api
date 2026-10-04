@@ -135,7 +135,7 @@ export class SessionService {
 
     const decision = await consumeRateLimit(REFRESH_LIMITER, row.familyId, this.limiterDeps());
     if (!decision.allowed) {
-      logRateLimited(REFRESH_LIMITER.name, false, this.limiterDeps());
+      logRateLimited(REFRESH_LIMITER.name, decision.degraded === true, this.limiterDeps());
       return { kind: "rate_limited", retryAfterSeconds: Math.max(1, decision.retryAfterSeconds) };
     }
 

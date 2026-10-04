@@ -99,6 +99,7 @@ describe("request logging", () => {
 
       expect(line?.level).toBe("error");
       expect(line?.route).toBe("/api/__test/boom");
+      expect(JSON.stringify(capture.lines())).not.toContain("synthetic-value");
     } finally {
       capture.restore();
     }

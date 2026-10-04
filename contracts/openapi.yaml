@@ -684,7 +684,7 @@ paths:
       security: []
       x-roles: [public]
       x-ownership: none
-      x-error-codes: []
+      x-error-codes: [InternalError]
       parameters:
         - $ref: '#/components/parameters/RequestIdHeader'
       responses:
@@ -696,6 +696,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthLive' }
+        '500': { $ref: '#/components/responses/InternalError' }
 
   /api/health/ready:
     get:
@@ -709,7 +710,7 @@ paths:
       security: []
       x-roles: [public]
       x-ownership: none
-      x-error-codes: []
+      x-error-codes: [InternalError]
       parameters:
         - $ref: '#/components/parameters/RequestIdHeader'
       responses:
@@ -735,6 +736,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/HealthStatus' }
               example: { status: down, checks: { database: down, redis: up } }
+        '500': { $ref: '#/components/responses/InternalError' }
 
   # ── internal (internal listener only) ────────────────────────────────────────
   /internal/auth/token:
@@ -909,7 +911,7 @@ paths:
       x-roles: [public]
       x-ownership: none
       x-scope: none
-      x-error-codes: []
+      x-error-codes: [InternalError]
       parameters:
         - $ref: '#/components/parameters/RequestIdHeader'
       responses:
@@ -921,6 +923,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthLive' }
+        '500': { $ref: '#/components/responses/InternalError' }
 
   /internal/health/ready:
     servers:
@@ -938,7 +941,7 @@ paths:
       x-roles: [public]
       x-ownership: none
       x-scope: none
-      x-error-codes: []
+      x-error-codes: [InternalError]
       parameters:
         - $ref: '#/components/parameters/RequestIdHeader'
       responses:
@@ -958,6 +961,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/HealthStatus' }
+        '500': { $ref: '#/components/responses/InternalError' }
 
 components:
   securitySchemes:
@@ -1031,7 +1035,7 @@ components:
       description: The request id adopted or generated for this request.
       schema: { type: string, format: uuid }
     CacheControlNoStore:
-      description: Every /api/auth/* response, including errors, and every token response is non-cacheable.
+      description: The response must not be stored by any cache (every /api/auth/* response, every token response, and the health probes).
       schema: { type: string, const: no-store }
     SetRefreshCookie:
       description: Sets the rotated refresh token.
@@ -1079,11 +1083,11 @@ components:
             Unauthorized:
               value:
                 success: false
-                error: { code: Unauthorized, message: Authentication required, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: Unauthorized, message: Authentication required, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
             TokenExpired:
               value:
                 success: false
-                error: { code: TokenExpired, message: Access token expired, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: TokenExpired, message: Access token expired, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     InvalidCredentials:
       description: Credentials rejected (never reveals which part was wrong).
       headers:
@@ -1095,7 +1099,7 @@ components:
             InvalidCredentials:
               value:
                 success: false
-                error: { code: InvalidCredentials, message: Invalid credentials, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: InvalidCredentials, message: Invalid credentials, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     UnauthorizedOrInvalidCredentials:
       description: Bearer token missing/invalid/expired, or the current password is wrong.
       headers:
@@ -1107,15 +1111,15 @@ components:
             Unauthorized:
               value:
                 success: false
-                error: { code: Unauthorized, message: Authentication required, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: Unauthorized, message: Authentication required, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
             TokenExpired:
               value:
                 success: false
-                error: { code: TokenExpired, message: Access token expired, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: TokenExpired, message: Access token expired, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
             InvalidCredentials:
               value:
                 success: false
-                error: { code: InvalidCredentials, message: Invalid credentials, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: InvalidCredentials, message: Invalid credentials, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     RefreshUnauthorized:
       description: |
         Refresh token missing, unknown, expired, revoked, or reused. The cookie is cleared, **except** for
@@ -1135,11 +1139,11 @@ components:
             RefreshTokenInvalid:
               value:
                 success: false
-                error: { code: RefreshTokenInvalid, message: Refresh token is invalid, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: RefreshTokenInvalid, message: Refresh token is invalid, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
             RefreshTokenReused:
               value:
                 success: false
-                error: { code: RefreshTokenReused, message: Refresh token reuse detected; session revoked, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: RefreshTokenReused, message: Refresh token reuse detected; session revoked, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     ServiceTokenRequired:
       description: No valid service token (a user token is always rejected here).
       headers:
@@ -1151,7 +1155,7 @@ components:
             ServiceTokenRequired:
               value:
                 success: false
-                error: { code: ServiceTokenRequired, message: A valid service token is required, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: ServiceTokenRequired, message: A valid service token is required, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     Forbidden:
       description: Role or ownership check failed, or the caller's account state forbids the action.
       headers:
@@ -1163,15 +1167,15 @@ components:
             Forbidden:
               value:
                 success: false
-                error: { code: Forbidden, message: You are not allowed to perform this action, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: Forbidden, message: You are not allowed to perform this action, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
             AccountSuspended:
               value:
                 success: false
-                error: { code: AccountSuspended, message: Account is suspended, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: AccountSuspended, message: Account is suspended, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
             DoctorTarget:
               value:
                 success: false
-                error: { code: Forbidden, message: Doctor account status is managed by care-service, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: Forbidden, message: Doctor account status is managed by care-service, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     AccountStateForbidden:
       description: The account is suspended.
       headers:
@@ -1183,7 +1187,7 @@ components:
             AccountSuspended:
               value:
                 success: false
-                error: { code: AccountSuspended, message: Account is suspended, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: AccountSuspended, message: Account is suspended, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     RefreshAccountSuspended:
       description: The account is suspended; the family is revoked and the cookie cleared.
       headers:
@@ -1197,7 +1201,7 @@ components:
             AccountSuspended:
               value:
                 success: false
-                error: { code: AccountSuspended, message: Account is suspended, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: AccountSuspended, message: Account is suspended, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     InsufficientScope:
       description: The service token (or requested scope) lacks the required scope.
       headers:
@@ -1209,7 +1213,7 @@ components:
             InsufficientScope:
               value:
                 success: false
-                error: { code: InsufficientScope, message: Token lacks the required scope, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: InsufficientScope, message: Token lacks the required scope, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     NotFound:
       description: Resource absent or not visible to the caller.
       headers:
@@ -1221,7 +1225,7 @@ components:
             NotFound:
               value:
                 success: false
-                error: { code: NotFound, message: Resource not found, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: NotFound, message: Resource not found, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     Conflict:
       description: Conflicts with existing state (e.g. a concurrent registration for the same email won the race).
       headers:
@@ -1233,7 +1237,7 @@ components:
             Conflict:
               value:
                 success: false
-                error: { code: Conflict, message: Email is already registered, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: Conflict, message: Email is already registered, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     InvalidStatusTransition:
       description: The requested status change is not allowed from the current status for this caller. Non-retryable.
       headers:
@@ -1245,7 +1249,7 @@ components:
             InvalidStatusTransition:
               value:
                 success: false
-                error: { code: InvalidStatusTransition, message: Cannot change status from rejected to active, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: InvalidStatusTransition, message: Cannot change status from rejected to active, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     IdempotencyConflict:
       description: Same Idempotency-Key reused with a different request body.
       headers:
@@ -1257,7 +1261,7 @@ components:
             IdempotencyConflict:
               value:
                 success: false
-                error: { code: IdempotencyConflict, message: Idempotency-Key was used with a different request body, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: IdempotencyConflict, message: Idempotency-Key was used with a different request body, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     RateLimited:
       description: Rate limiter tripped.
       headers:
@@ -1270,7 +1274,7 @@ components:
             RateLimited:
               value:
                 success: false
-                error: { code: RateLimited, message: Too many requests, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: RateLimited, message: Too many requests, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     InternalError:
       description: Unhandled error. No stack trace or internals in the body.
       headers:
@@ -1282,7 +1286,7 @@ components:
             InternalError:
               value:
                 success: false
-                error: { code: InternalError, message: Internal server error, requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                error: { code: InternalError, message: Internal server error, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
 
   schemas:
     # ── envelopes ──
@@ -1304,12 +1308,13 @@ components:
         success: { type: boolean, const: false }
         error:
           type: object
-          required: [code, message, requestId]
+          required: [code, message, details, requestId]
           properties:
             code: { $ref: '#/components/schemas/ErrorCode' }
             message: { type: string, description: 'Human-readable; clients branch on `code`, never on `message`.' }
             details:
               type: array
+              description: Always present; empty when the error has no per-field detail.
               items: { $ref: '#/components/schemas/ErrorDetail' }
             requestId: { type: string, format: uuid }
     ErrorDetail:
@@ -1446,17 +1451,20 @@ components:
     HealthLive:
       type: object
       description: Liveness body (ADR 0014).
+      additionalProperties: false
       required: [status]
       properties:
         status: { type: string, const: ok }
     HealthStatus:
       type: object
       description: Readiness body (ADR 0014). `down` exactly when the response is 503.
+      additionalProperties: false
       required: [status, checks]
       properties:
         status: { type: string, enum: [ok, degraded, down] }
         checks:
           type: object
+          additionalProperties: false
           required: [database, redis]
           properties:
             database: { type: string, enum: [up, down] }

@@ -95,7 +95,9 @@ export const envSchema = z
     PORT: port.default(3000),
     INTERNAL_PORT: port.default(3100),
     INTERNAL_HOST: z.union([z.ipv4(), z.ipv6()]).default("127.0.0.1"),
-    TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
+    // Required (>= 1) in production; the public edge is CloudFront + ALB, the internal LB is one hop.
+    TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).optional(),
+    INTERNAL_TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).optional(),
     DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
     DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
     REDIS_URL: z.url({ protocol: /^rediss?$/ }),
@@ -103,6 +105,10 @@ export const envSchema = z
     LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(10000),
     RATE_LIMIT_FALLBACK_DIVISOR: z.coerce.number().int().min(1).default(2),
+    // Circuit breaker for a connected-but-unresponsive Redis (ADR 0008; not secrets).
+    REDIS_BREAKER_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(1000).default(5),
+    REDIS_BREAKER_WINDOW_MS: z.coerce.number().int().min(100).max(600000).default(10000),
+    REDIS_BREAKER_COOLDOWN_MS: z.coerce.number().int().min(100).max(600000).default(15000),
     WORKER_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(60000).default(1000),
 
     // ── auth: tokens and one-time secrets (API) ──
@@ -152,6 +158,13 @@ export const envSchema = z
         message: "must use https in production",
       });
     }
+    if (value.NODE_ENV === "production" && (value.TRUST_PROXY_HOPS === undefined || value.TRUST_PROXY_HOPS < 1)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["TRUST_PROXY_HOPS"],
+        message: "must be set explicitly (>= 1) in production",
+      });
+    }
     if (value.INTERNAL_PORT === value.PORT) {
       ctx.addIssue({
         code: "custom",
@@ -166,4 +179,9 @@ export const envSchema = z
         message: "must not be debug in production",
       });
     }
-  });
+   })
+  .transform((value) => ({
+    ...value,
+    TRUST_PROXY_HOPS: value.TRUST_PROXY_HOPS ?? 0,
+    INTERNAL_TRUST_PROXY_HOPS: value.INTERNAL_TRUST_PROXY_HOPS ?? 0,
+  }));

@@ -3,6 +3,7 @@ export const TOKENS = {
   Env: Symbol.for("Env"),
   Logger: Symbol.for("Logger"),
   Db: Symbol.for("Db"),
+  ProbeDb: Symbol.for("ProbeDb"),
   Redis: Symbol.for("Redis"),
   Lifecycle: Symbol.for("Lifecycle"),
   HealthService: Symbol.for("HealthService"),

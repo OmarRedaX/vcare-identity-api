@@ -5,7 +5,7 @@ service: identity-service
 module: foundation
 status: in-progress
 diataxis: reference
-last_verified: 2026-09-16
+last_verified: 2026-10-04
 tags: [tasks, foundation, bootstrap, infrastructure, health, docker, ci]
 related: [foundation-spec, foundation-brainstorm, foundation-manual-qa, infrastructure, deployment, overview, quickstart, adr-0014-health-liveness-readiness-split, adr-0015-foundation-runtime-dependencies]
 ---
@@ -101,3 +101,10 @@ between the units; the hub sync and doc reconciliation happen after both land.
 
 ### follow-ups (reopened by `/update-docs`, 2026-09-16)
 - [x] (enums-errors-types) `src/lib/knex/knexfile.ts` — route Knex's own warnings/errors through `Logger` so a Postgres outage writes only JSON lines (manual-qa.md → Failures / notes; spec §15.3)
+
+### review fixes (`/develop foundation --fix-review`, 2026-10-04)
+- [x] (contract) `error.details` required; health operations declare `500 InternalError`; `additionalProperties: false` on health schemas; generic `CacheControlNoStore`
+- [x] (service) idempotency 429 delete + orphan-claim compensation; shutdown keep-alive drain and bounded pool close; readiness probe pool; client-side Postgres/Redis timeouts; trust-proxy env split; log error policy; OPTIONS 404; `degraded` flag; 499 requestId; cursor sort kinds; boot_failed; migration names
+- [x] (docs) spec §15.5, infrastructure, deployment, capacity, runbook, quickstart; compose/Dockerfile/curl script
+- [x] (tests) unit + integration additions for each fix (typecheck green; `npm test` 460+ green; integration green except a pre-existing auth `change-password` AccountSuspended case)
+- [ ] (docs) Care parity and hub contract sync for the items marked "Care parity" in the review (listed in the hand-off)

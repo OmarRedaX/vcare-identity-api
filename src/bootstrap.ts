@@ -19,7 +19,7 @@ import { TOKENS } from "./lib/di/tokens";
 import { FileCaptureEmailAdapter } from "./lib/email/file-capture-adapter";
 import { ResendEmailAdapter } from "./lib/email/resend-adapter";
 import type { EmailPort } from "./lib/email/types";
-import { db } from "./lib/knex/knex";
+import { db, probeDb } from "./lib/knex/knex";
 import { lifecycle } from "./lib/lifecycle/lifecycle";
 import { logger } from "./lib/logger/logger";
 import { PasswordHasher } from "./lib/password/password-hasher";
@@ -57,6 +57,7 @@ export function registerDependencies(overrides?: DependencyOverrides): Dependenc
   scope.registerInstance(TOKENS.Env, env);
   scope.registerInstance(TOKENS.Logger, overrides?.logger ?? logger);
   scope.registerInstance(TOKENS.Db, overrides?.db ?? db);
+  scope.registerInstance(TOKENS.ProbeDb, overrides?.probeDb ?? overrides?.db ?? probeDb);
   scope.registerInstance(TOKENS.Redis, overrides?.redis ?? redis);
   scope.registerInstance(TOKENS.Lifecycle, overrides?.lifecycle ?? lifecycle);
 

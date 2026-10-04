@@ -4,6 +4,8 @@ import type { Logger } from "../logger/logger";
 import type { RedisHealth } from "./types";
 
 const ERROR_LOG_INTERVAL_MS = 10_000;
+const REDIS_COMMAND_TIMEOUT_MS = 200;
+const REDIS_KEEP_ALIVE_MS = 10_000;
 
 /**
  * Redis is Tier 2 (ADR 0008): commands fail fast while disconnected and no request or readiness check
@@ -15,6 +17,11 @@ export function createRedis(url: string): Redis {
     enableOfflineQueue: false,
     maxRetriesPerRequest: 1,
     connectTimeout: 2000,
+    // Never replay commands whose caller already gave up (would double-count limiter hits / orphan claims).
+    autoResendUnfulfilledCommands: false,
+    // A connected-but-silent Redis is detected quickly instead of waiting for TCP retransmission.
+    commandTimeout: REDIS_COMMAND_TIMEOUT_MS,
+    keepAlive: REDIS_KEEP_ALIVE_MS,
     retryStrategy: (times: number) => Math.min(times * 200, 2000),
   });
 }

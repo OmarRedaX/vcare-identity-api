@@ -31,15 +31,13 @@ jest.mock("../../../../src/lib/rate-limit/rate-limit", () => ({
   logRateLimited: jest.fn(),
 }));
 
-const tokens = jest.requireMock(
-  "../../../../src/app/auth/repository/refresh-token.repo",
-) as MockedModule<typeof import("../../../../src/app/auth/repository/refresh-token.repo")>;
-const users = jest.requireMock("../../../../src/app/auth/repository/user.repo") as MockedModule<
+const tokens = jest.requireMock<MockedModule<typeof import("../../../../src/app/auth/repository/refresh-token.repo")>>("../../../../src/app/auth/repository/refresh-token.repo");
+const users = jest.requireMock<MockedModule<
   typeof import("../../../../src/app/auth/repository/user.repo")
->;
-const limiter = jest.requireMock("../../../../src/lib/rate-limit/rate-limit") as MockedModule<
+>>("../../../../src/app/auth/repository/user.repo");
+const limiter = jest.requireMock<MockedModule<
   typeof import("../../../../src/lib/rate-limit/rate-limit")
->;
+>>("../../../../src/lib/rate-limit/rate-limit");
 
 const NOW = new Date("2026-09-18T10:00:00.000Z");
 const EMAIL = "amira.patient@example.test";
@@ -112,22 +110,30 @@ function refreshRow(overrides: Partial<RefreshToken> = {}): RefreshToken {
 
 let sink: ReturnType<typeof logSink>;
 let trx: { commit: jest.Mock; rollback: jest.Mock };
-let db: Knex;
-let hasher: PasswordHasher;
-let signer: TokenSigner;
+let dbMock: { transaction: jest.Mock };
+let hasherMock: { hash: jest.Mock; verify: jest.Mock; verifyDummy: jest.Mock };
+let signerMock: { signUserToken: jest.Mock };
 let service: SessionService;
 
 beforeEach(() => {
   sink = logSink();
   trx = { commit: jest.fn().mockResolvedValue(undefined), rollback: jest.fn().mockResolvedValue(undefined) };
-  db = { transaction: jest.fn().mockResolvedValue(trx) } as unknown as Knex;
-  hasher = {
+  dbMock = { transaction: jest.fn().mockResolvedValue(trx) };
+  hasherMock = {
     hash: jest.fn().mockResolvedValue(PASSWORD_HASH),
     verify: jest.fn().mockResolvedValue({ ok: true, needsRehash: false }),
     verifyDummy: jest.fn().mockResolvedValue(undefined),
-  } as unknown as PasswordHasher;
-  signer = { signUserToken: jest.fn().mockResolvedValue(ACCESS_TOKEN) } as unknown as TokenSigner;
-  service = new SessionService(db, redis, sink.logger, clock, env, hasher, signer);
+  };
+  signerMock = { signUserToken: jest.fn().mockResolvedValue(ACCESS_TOKEN) };
+  service = new SessionService(
+    dbMock as unknown as Knex,
+    redis,
+    sink.logger,
+    clock,
+    env,
+    hasherMock as unknown as PasswordHasher,
+    signerMock as unknown as TokenSigner,
+  );
 
   limiter.consumeRateLimit.mockResolvedValue({ allowed: true, retryAfterSeconds: 0 });
   tokens.insertToken.mockResolvedValue(77);
@@ -154,7 +160,7 @@ describe("SessionService.login", () => {
       }),
       trx,
     );
-    const inserted = tokens.insertToken.mock.calls[0]?.[0] as { familyId: string };
+    const inserted = (tokens.insertToken.mock.calls as unknown[][])[0]?.[0] as { familyId: string };
     expect(inserted.familyId).toMatch(/^[0-9a-f-]{36}$/);
     expect(trx.commit).toHaveBeenCalledTimes(1);
   });
@@ -166,7 +172,7 @@ describe("SessionService.login", () => {
       service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined }),
     ).rejects.toMatchObject({ code: "InvalidCredentials", status: 401 });
 
-    expect(hasher.verifyDummy).toHaveBeenCalledWith(PASSWORD);
+    expect(hasherMock.verifyDummy).toHaveBeenCalledWith(PASSWORD);
     expect(tokens.insertToken).not.toHaveBeenCalled();
     expect(sink.lines()).toContainEqual(
       expect.objectContaining({ message: "login_failed", reason: "unknown_email" }),
@@ -175,13 +181,13 @@ describe("SessionService.login", () => {
 
   it("should answer InvalidCredentials without a dummy verify when the password is wrong", async () => {
     users.findLiveByEmail.mockResolvedValue(user());
-    (hasher.verify as jest.Mock).mockResolvedValue({ ok: false, needsRehash: false });
+    hasherMock.verify.mockResolvedValue({ ok: false, needsRehash: false });
 
     await expect(
       service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined }),
     ).rejects.toMatchObject({ code: "InvalidCredentials" });
 
-    expect(hasher.verifyDummy).not.toHaveBeenCalled();
+    expect(hasherMock.verifyDummy).not.toHaveBeenCalled();
     expect(sink.lines()).toContainEqual(
       expect.objectContaining({ message: "login_failed", reason: "wrong_password", userId: 1042 }),
     );
@@ -194,13 +200,13 @@ describe("SessionService.login", () => {
       service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined }),
     ).rejects.toMatchObject({ code: "AccountSuspended", status: 403 });
 
-    expect(hasher.verify).toHaveBeenCalled();
+    expect(hasherMock.verify).toHaveBeenCalled();
     expect(tokens.insertToken).not.toHaveBeenCalled();
   });
 
   it("should answer InvalidCredentials, not AccountSuspended, when a suspended account sends a wrong password", async () => {
     users.findLiveByEmail.mockResolvedValue(user({ status: "suspended" }));
-    (hasher.verify as jest.Mock).mockResolvedValue({ ok: false, needsRehash: false });
+    hasherMock.verify.mockResolvedValue({ ok: false, needsRehash: false });
 
     await expect(
       service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined }),
@@ -219,11 +225,11 @@ describe("SessionService.login", () => {
 
   it("should rehash a legacy hash inside the login transaction when a rehash is needed", async () => {
     users.findLiveByEmail.mockResolvedValue(user({ passwordHash: "$2b$10$legacy" }));
-    (hasher.verify as jest.Mock).mockResolvedValue({ ok: true, needsRehash: true });
+    hasherMock.verify.mockResolvedValue({ ok: true, needsRehash: true });
 
     await service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined });
 
-    expect(hasher.hash).toHaveBeenCalledWith(PASSWORD);
+    expect(hasherMock.hash).toHaveBeenCalledWith(PASSWORD);
     expect(users.updatePasswordHash).toHaveBeenCalledWith(1042, PASSWORD_HASH, trx);
     expect(sink.lines()).toContainEqual(
       expect.objectContaining({ message: "password_rehashed", userId: 1042 }),
@@ -232,8 +238,8 @@ describe("SessionService.login", () => {
 
   it("should still log in and skip the rehash when the hash queue is full", async () => {
     users.findLiveByEmail.mockResolvedValue(user({ passwordHash: "$2b$10$legacy" }));
-    (hasher.verify as jest.Mock).mockResolvedValue({ ok: true, needsRehash: true });
-    (hasher.hash as jest.Mock).mockRejectedValue(new Error("queue full"));
+    hasherMock.verify.mockResolvedValue({ ok: true, needsRehash: true });
+    hasherMock.hash.mockRejectedValue(new Error("queue full"));
 
     await expect(
       service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined }),
@@ -249,13 +255,13 @@ describe("SessionService.login", () => {
     users.findLiveByEmail.mockResolvedValue(user());
 
     await service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined });
-    expect(tokens.insertToken.mock.calls[0]?.[0]).toMatchObject({ deviceInfo: null });
+    expect((tokens.insertToken.mock.calls as unknown[][])[0]?.[0]).toMatchObject({ deviceInfo: null });
 
     await service.login({ email: EMAIL, password: PASSWORD, userAgent: "" });
-    expect(tokens.insertToken.mock.calls[1]?.[0]).toMatchObject({ deviceInfo: null });
+    expect((tokens.insertToken.mock.calls as unknown[][])[1]?.[0]).toMatchObject({ deviceInfo: null });
 
     await service.login({ email: EMAIL, password: PASSWORD, userAgent: "u".repeat(400) });
-    const third = tokens.insertToken.mock.calls[2]?.[0] as { deviceInfo: string };
+    const third = (tokens.insertToken.mock.calls as unknown[][])[2]?.[0] as { deviceInfo: string };
     expect(third.deviceInfo).toHaveLength(255);
   });
 
@@ -311,7 +317,7 @@ describe("SessionService.refresh", () => {
       FAMILY,
       expect.anything(),
     );
-    expect(db.transaction).not.toHaveBeenCalled();
+    expect(dbMock.transaction).not.toHaveBeenCalled();
   });
 
   it("should rotate in one transaction and return the new token when the presented token is live", async () => {
@@ -328,7 +334,7 @@ describe("SessionService.refresh", () => {
     );
     expect(tokens.markRotated).toHaveBeenCalledWith(5, 77, trx);
     // Signed before COMMIT, so a signing failure can never strand a rotated family.
-    const signOrder = (signer.signUserToken as jest.Mock).mock.invocationCallOrder[0] ?? 0;
+    const signOrder = signerMock.signUserToken.mock.invocationCallOrder[0] ?? 0;
     const commitOrder = trx.commit.mock.invocationCallOrder[0] ?? 0;
     expect(signOrder).toBeLessThan(commitOrder);
     expect(trx.commit).toHaveBeenCalledTimes(1);
@@ -416,7 +422,7 @@ describe("SessionService.refresh", () => {
     );
 
     await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "invalid" });
-    expect(db.transaction).not.toHaveBeenCalled();
+    expect(dbMock.transaction).not.toHaveBeenCalled();
   });
 
   it("should revoke the family and return suspended when the user was suspended meanwhile", async () => {

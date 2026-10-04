@@ -1,24 +1,7 @@
+import type { ERROR_CODES } from "./error-codes";
+
 /** The contract's ErrorCode enum (contracts/openapi.yaml -> components.schemas.ErrorCode). */
-export type ErrorCode =
-  | "ValidationFailed"
-  | "Unauthorized"
-  | "TokenExpired"
-  | "InvalidCredentials"
-  | "RefreshTokenInvalid"
-  | "RefreshTokenReused"
-  | "EmailNotVerified"
-  | "AccountPending"
-  | "AccountSuspended"
-  | "AccountRejected"
-  | "Forbidden"
-  | "ServiceTokenRequired"
-  | "InsufficientScope"
-  | "NotFound"
-  | "Conflict"
-  | "InvalidStatusTransition"
-  | "IdempotencyConflict"
-  | "RateLimited"
-  | "InternalError";
+export type ErrorCode = (typeof ERROR_CODES)[number];
 
 export interface ErrorDetail {
   field: string;

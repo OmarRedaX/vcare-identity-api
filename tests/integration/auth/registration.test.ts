@@ -307,7 +307,7 @@ describe("POST /api/auth/register/complete", () => {
       timezone: "Africa/Cairo",
       locale: "ar-EG",
     });
-    const row = await db("users").select("timezone", "locale").where("email", address).first();
+    const row = await db("users").select("timezone", "locale").where("email", address).first<Record<string, unknown> | undefined>();
     expect(row).toEqual({ timezone: "Africa/Cairo", locale: "ar-EG" });
   });
 

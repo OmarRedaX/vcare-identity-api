@@ -3,7 +3,7 @@ title: Identity Service — Docs Index
 owner: identity-team
 service: identity-service
 status: draft
-last_verified: 2026-09-18
+last_verified: 2026-10-04
 tags: [index, router, identity]
 related: [service-card, system-design, runbook, quickstart]
 ---
@@ -89,6 +89,7 @@ module doc when it is created.
 | [users/brainstorm.md](./users/brainstorm.md) | see the agreed scope of admin user management (list/get users, patient status changes with history, session list/revoke) and its open questions | explanation |
 | [auth/tasks.md](./auth/tasks.md) | see Epic A's unit graph (auth then users, serial) and the auth build tasks and their status (build complete; tests, manual QA and doc reconciliation open) | reference |
 | [users/tasks.md](./users/tasks.md) | see the users build tasks and their status (depends on auth) | reference |
+| [auth/manual-qa.md](./auth/manual-qa.md) | re-run or review the CURL checks of every `/api/auth/*` operation and the JWKS (enumeration safety, idempotency, refresh rotation/reuse/grace, rate limits, no-store, log PII scan) and see the open defects | how-to |
 | [foundation/manual-qa.md](./foundation/manual-qa.md) | re-run or review the CURL checks of health, request id, envelope, listener isolation, headers, CORS, and the readiness table with Redis/Postgres stopped | how-to |
 
 ---

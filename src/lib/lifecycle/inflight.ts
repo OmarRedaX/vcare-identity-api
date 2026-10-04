@@ -14,7 +14,18 @@ export function inflightTracker(lc: Lifecycle = defaultLifecycle): RequestHandle
       lc.requestEnded();
     };
 
-    res.on("finish", end);
+    if (lc.isShuttingDown()) {
+      res.setHeader("Connection", "close");
+    }
+
+    res.on("finish", () => {
+      end();
+      // A keep-alive socket whose last request ends during shutdown would otherwise stay open and
+      // stall server.close() until the shutdown deadline.
+      if (lc.isShuttingDown() && !res.req.socket.destroyed) {
+        res.req.socket.end();
+      }
+    });
     res.on("close", end);
     next();
   };

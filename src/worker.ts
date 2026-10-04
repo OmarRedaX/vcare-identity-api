@@ -10,6 +10,7 @@ import { logger } from "./lib/logger/logger";
 import { OutboxProcessor } from "./lib/outbox/outbox-processor";
 import { redis } from "./lib/redis/redis";
 import { runLoop } from "./lib/worker/run-loop";
+import { withDeadline } from "./pkg/utils/promise";
 import { toMs } from "./pkg/utils/time";
 import type { LoopHandle } from "./lib/worker/types";
 import type { ShutdownReason, WorkerHandle } from "./types";
@@ -89,7 +90,7 @@ export function startWorker(): Promise<WorkerHandle> {
       logger.error("worker_shutdown_timeout");
     }
 
-    await db.destroy().catch(() => undefined);
+    await withDeadline(db.destroy(), env.SHUTDOWN_TIMEOUT_MS);
     redis.disconnect();
 
     if (!stopped) {
@@ -107,7 +108,7 @@ export function startWorker(): Promise<WorkerHandle> {
 }
 
 if (require.main === module) {
-  void startWorker().then((worker) => {
+  const boot = startWorker().then((worker) => {
     const exitAfterShutdown = (reason: ShutdownReason): void => {
       void worker.shutdown(reason).then((code) => {
         process.exit(code);
@@ -128,5 +129,10 @@ if (require.main === module) {
       logger.error("unhandled_rejection", { err });
       exitAfterShutdown("unhandledRejection");
     });
+  });
+
+  boot.catch((err: unknown) => {
+    logger.error("boot_failed", { err });
+    process.exit(1);
   });
 }

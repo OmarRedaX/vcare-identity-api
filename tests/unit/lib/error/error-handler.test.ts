@@ -13,10 +13,12 @@ interface FakeRes {
   headersSent: boolean;
   writableEnded: boolean;
   ended: boolean;
+  destroyed?: boolean;
   locals: Record<string, unknown>;
   status(code: number): FakeRes;
   json(body: unknown): FakeRes;
   end(): void;
+  destroy(): void;
 }
 
 function fakeReq(): Request {
@@ -48,6 +50,9 @@ function fakeRes(): FakeRes {
     },
     end(): void {
       res.ended = true;
+    },
+    destroy(): void {
+      res.destroyed = true;
     },
   };
   return res;
@@ -158,7 +163,8 @@ describe("errorHandler", () => {
       expect(line).toBeDefined();
       expect(line?.level).toBe("error");
       const err = line?.err as { name: string; message: string; stack: string };
-      expect(err.message).toBe("boom");
+      expect(err.message).toBe("error:Error");
+      expect(err.stack).not.toContain("boom");
       expect(typeof err.stack).toBe("string");
     } finally {
       capture.restore();
@@ -183,7 +189,7 @@ describe("errorHandler", () => {
     }
   });
 
-  it("should delegate to next when headers were already sent", () => {
+  it("should log once and destroy the response instead of calling next when headers were already sent", () => {
     const res = fakeRes();
     res.headersSent = true;
     const next = jest.fn();
@@ -191,7 +197,8 @@ describe("errorHandler", () => {
 
     handle(err, res, next);
 
-    expect(next).toHaveBeenCalledWith(err);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.destroyed).toBe(true);
     expect(res.body).toBeUndefined();
   });
 

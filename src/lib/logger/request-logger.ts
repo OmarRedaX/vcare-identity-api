@@ -11,6 +11,8 @@ const CLIENT_CLOSED_STATUS = 499;
 export function requestLogger(log: Logger = defaultLogger): RequestHandler {
   return (req, res, next) => {
     const startedAt = process.hrtime.bigint();
+    // The socket "close" event runs outside the request context, so the id is captured on entry.
+    const requestId = req.requestId;
     let logged = false;
 
     const complete = (clientClosed: boolean): void => {
@@ -28,7 +30,7 @@ export function requestLogger(log: Logger = defaultLogger): RequestHandler {
         return;
       }
 
-      const fields = { method: req.method, route, status, durationMs };
+      const fields = { requestId, method: req.method, route, status, durationMs };
       if (status >= 500) {
         log.error("request_completed", fields);
       } else {

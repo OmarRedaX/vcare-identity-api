@@ -3,6 +3,7 @@ import helmet from "helmet";
 import { env } from "./lib/config/env";
 import { errorHandler, notFoundHandler } from "./lib/error/errorHandler";
 import { cors } from "./lib/http/cors";
+import { rejectOptions } from "./lib/http/reject-options";
 import { inflightTracker } from "./lib/lifecycle/inflight";
 import { logger } from "./lib/logger/logger";
 import { requestLogger } from "./lib/logger/request-logger";
@@ -35,6 +36,7 @@ export function createApp(options?: AppOptions): Express {
     }
   }
 
+  app.use(rejectOptions());
   app.use(express.json({ limit: JSON_BODY_LIMIT, strict: true, type: "application/json" }));
 
   // JWKS lives outside /api (contract `getJwks`) and outside the /api/auth no-store rule.

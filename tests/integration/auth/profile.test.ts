@@ -200,7 +200,7 @@ describe("PATCH /api/auth/me", () => {
     const response = await patchMe(token, { phone: null, avatarUrl: null });
 
     expect(expectSuccessEnvelope(response.body)).toMatchObject({ phone: null, avatarUrl: null });
-    const row = await db("users").select("phone", "avatar_url").where("id", user.id).first();
+    const row = await db("users").select("phone", "avatar_url").where("id", user.id).first<Record<string, unknown> | undefined>();
     expect(row).toEqual({ phone: null, avatar_url: null });
   });
 
@@ -221,7 +221,7 @@ describe("PATCH /api/auth/me", () => {
       const details = (response.body as { error: { details: { issue: string }[] } }).error.details;
       expect(details.some((detail) => detail.issue === "is not allowed")).toBe(true);
     }
-    const row = await db("users").select("email", "role", "status").where("id", user.id).first();
+    const row = await db("users").select("email", "role", "status").where("id", user.id).first<Record<string, unknown> | undefined>();
     expect(row).toMatchObject({ email: user.email, role: "patient", status: "active" });
   });
 
@@ -257,7 +257,7 @@ describe("PATCH /api/auth/me", () => {
 
     expect(response.status).toBe(403);
     expectErrorEnvelope(response.body, "AccountSuspended");
-    const row = await db("users").select("full_name").where("id", user.id).first();
+    const row = await db("users").select("full_name").where("id", user.id).first<Record<string, unknown> | undefined>();
     expect(row?.full_name).toBe("Amira Hassan");
   });
 

@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: reference
-last_verified: 2026-09-16
+last_verified: 2026-10-04
 tags: [architecture, infrastructure, env, logging, health, rate-limit, idempotency, shutdown]
 related: [system-design, overview, auth-tokens, runbook, quickstart, deployment, foundation-spec, adr-0008-redis-tier-2-fallback-limiter, adr-0013-log-derived-metrics, adr-0014-health-liveness-readiness-split, adr-0015-foundation-runtime-dependencies]
 ---
@@ -31,7 +31,8 @@ module (`planned`).
 | `PORT` | int 1..65535 | `3000` | no | foundation | public listener (binds all interfaces) |
 | `INTERNAL_PORT` | int 1..65535, ≠ `PORT` | `3100` | no | foundation | internal listener |
 | `INTERNAL_HOST` | IPv4 or IPv6 address | `127.0.0.1` | no | foundation | interface the internal listener binds to; a container deployment sets the task's private interface (dev compose uses `0.0.0.0`) |
-| `TRUST_PROXY_HOPS` | int 0..10 | `0` | no | foundation | Express `trust proxy` on both apps = number of proxy hops in front of the task; drives `req.ip` for rate-limit and idempotency subjects |
+| `TRUST_PROXY_HOPS` | int 0..10 | `0` outside production; **required, >= 1 in production** | prod: yes | foundation | Express `trust proxy` on the **public** app = proxy hops in front of the task (CloudFront + ALB = 2); drives `req.ip` for rate-limit and idempotency subjects |
+| `INTERNAL_TRUST_PROXY_HOPS` | int 0..10 | `0` | no | foundation | Express `trust proxy` on the **internal** app = hops of the internal LB; no IP-keyed decision uses it yet |
 | `DATABASE_URL` | `postgres://` or `postgresql://` URL | — | yes | foundation | identity database |
 | `DATABASE_POOL_MAX` | int 1..100 | `10` | no | foundation | Knex pool size per process |
 | `REDIS_URL` | `redis://` or `rediss://` URL | — | yes | foundation | rate limits, idempotency |
@@ -39,6 +40,9 @@ module (`planned`).
 | `LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` | `info` | no | foundation | `debug` rejected when `NODE_ENV=production` |
 | `SHUTDOWN_TIMEOUT_MS` | int 1000..60000 | `10000` | no | foundation | graceful shutdown deadline (API and worker) |
 | `RATE_LIMIT_FALLBACK_DIVISOR` | int ≥ 1 | `2` | no | foundation | per-instance fallback limit = max(1, floor(limit / divisor)) when Redis is down (ADR 0008) |
+| `REDIS_BREAKER_FAILURE_THRESHOLD` | int 1..1000 | `5` | no | foundation | consecutive Redis command timeouts/errors within the window that open the circuit breaker |
+| `REDIS_BREAKER_WINDOW_MS` | int 100..600000 | `10000` | no | foundation | a failure streak older than this restarts from one |
+| `REDIS_BREAKER_COOLDOWN_MS` | int 100..600000 | `15000` | no | foundation | time the breaker stays open before one half-open probe is admitted |
 | `WORKER_POLL_INTERVAL_MS` | int 100..60000 | `1000` | no | foundation | worker loop interval (ADR 0007) |
 | `JWT_PRIVATE_KEYS` | JSON array of `{ kid, privateJwk }` (Ed25519 OKP), ≥ 1 entry, unique `kid` | — | yes | planned | signing key set; public halves published as JWKS |
 | `JWT_ACTIVE_KID` | string, must match a `kid` in `JWT_PRIVATE_KEYS` | — | no | planned | key used to sign new tokens |
@@ -201,7 +205,7 @@ registration challenge also allows at most 5 code attempts.
 - A tripped limiter returns `429 RateLimited` with `Retry-After` (seconds, ≥ 1), logs `rate_limited { limiter, degraded }`
   at `warn`, and emits the `rate_limited` metric.
 - Client IP is `req.ip` with IPv4-mapped IPv6 normalized. `X-Forwarded-For` is honoured only across
-  `TRUST_PROXY_HOPS` proxy hops (0 locally, so it cannot be spoofed).
+  `TRUST_PROXY_HOPS` proxy hops on the public listener (`INTERNAL_TRUST_PROXY_HOPS` on the internal one); 0 locally, so it cannot be spoofed, and unset is refused in production.
 - **Redis unavailable (ADR 0008 — Redis is Tier 2)**, meaning the client is not ready, the script errors, or it takes > 50 ms:
   - `degrade: "fallback"`: credential routes (login, register start/complete, forgot, reset, token) switch to a
     process-wide **in-process per-task limiter** at `max(1, floor(limit / RATE_LIMIT_FALLBACK_DIVISOR))` (at most
@@ -238,6 +242,15 @@ care-service). The body hash is sha256 of a JSON serialization that ignores key 
 - Redis (`ioredis`) connects lazily in the background at boot, so a Redis outage never blocks startup. The offline
   queue is disabled so commands fail fast, with 1 retry per request, a 2 s connect timeout, and endless reconnects
   (backoff ≤ 2 s). Logs: `redis_ready`, `redis_error` (at most once per 10 s, error name only), `redis_connect_failed`.
+- **Circuit breaker for a connected-but-unresponsive Redis** (`lib/redis/circuit-breaker.ts`, one per client via
+  `lib/redis/redis-guard.ts`). `commandTimeout` 200 ms and `keepAlive` 10 s detect a silent socket; the breaker adds
+  memory of it: after `REDIS_BREAKER_FAILURE_THRESHOLD` consecutive timeouts/errors within `REDIS_BREAKER_WINDOW_MS` it
+  opens for `REDIS_BREAKER_COOLDOWN_MS`, during which `redisUsable()` is false and callers take their ADR 0008 path with
+  no wait (limiter in-process fallback, idempotency skipped, refresh limiter fails open). After the cool-down exactly one
+  probe is admitted (half-open); success closes, failure re-opens for a fresh cool-down. Any success resets the streak.
+  Only rate-limit and idempotency commands feed it; the readiness `PING` is separate and unchanged, so Redis never fails
+  readiness. Logs: `redis_breaker_open` (warn), `redis_breaker_half_open`, `redis_breaker_closed` (info), plus the
+  `redis_breaker_open` / `redis_breaker_closed` metrics.
 
 ## 9. Security headers, body parsing, and CORS
 - `helmet` defaults on both listeners; HSTS only on the public listener in production. `X-Powered-By` disabled.

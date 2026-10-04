@@ -65,6 +65,70 @@ export function blockList(block: string, key: string): string[] {
   return values;
 }
 
+export interface ContractOperation {
+  statuses: string[];
+  /** Header names declared inline per status (a `$ref` response contributes no inline headers). */
+  headersByStatus: Record<string, string[]>;
+  errorCodes: string[];
+}
+
+/** The declared status codes, inline response headers and `x-error-codes` of one operation. */
+export function contractOperation(pathName: string, method: string): ContractOperation {
+  const lines = CONTRACT.split(/\r?\n/);
+  const pathStart = lines.indexOf(`  ${pathName}:`);
+  if (pathStart < 0) {
+    throw new Error(`path ${pathName} is missing from contracts/openapi.yaml`);
+  }
+  const afterPath = lines.slice(pathStart + 1);
+  const pathEnd = afterPath.findIndex((line) => /^ {0,2}\S/.test(line));
+  const pathLines = afterPath.slice(0, pathEnd < 0 ? afterPath.length : pathEnd);
+
+  const opStart = pathLines.indexOf(`    ${method}:`);
+  if (opStart < 0) {
+    throw new Error(`${method} ${pathName} is missing from contracts/openapi.yaml`);
+  }
+  const afterOp = pathLines.slice(opStart + 1);
+  const opEnd = afterOp.findIndex((line) => /^ {0,4}\S/.test(line));
+  const opLines = afterOp.slice(0, opEnd < 0 ? afterOp.length : opEnd);
+
+  const errorLine = opLines.find((line) => line.trim().startsWith("x-error-codes:")) ?? "";
+  const errorCodes = (/\[([^\]]*)\]/.exec(errorLine)?.[1] ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+
+  const responsesStart = opLines.indexOf("      responses:");
+  const statuses: string[] = [];
+  const headersByStatus: Record<string, string[]> = {};
+  let current: string | undefined;
+  let inHeaders = false;
+  for (const line of opLines.slice(responsesStart + 1)) {
+    const status = /^ {8}'(\d{3})':/.exec(line);
+    if (status?.[1]) {
+      current = status[1];
+      statuses.push(current);
+      headersByStatus[current] = [];
+      inHeaders = false;
+      continue;
+    }
+    if (current === undefined) {
+      continue;
+    }
+    if (/^ {10}headers:/.test(line)) {
+      inHeaders = true;
+      continue;
+    }
+    if (/^ {10}\S/.test(line)) {
+      inHeaders = false;
+    }
+    const header = /^ {12}([A-Za-z-]+):/.exec(line);
+    if (inHeaders && header?.[1]) {
+      headersByStatus[current]?.push(header[1]);
+    }
+  }
+  return { statuses, headersByStatus, errorCodes };
+}
+
 export function contractErrorCodes(): string[] {
   return blockList(schemaBlock("ErrorCode"), "enum");
 }
@@ -73,13 +137,13 @@ export function contractHealthStatusValues(): string[] {
   return inlineList(schemaBlock("HealthStatus"), "enum");
 }
 
-export function contractDependencyStates(): string[] {
+export function contractDependencyStates(dependency: "database" | "redis" = "database"): string[] {
   const block = schemaBlock("HealthStatus");
-  const database = /database:\s*\{[^}]*enum:\s*\[([^\]]*)\]/.exec(block);
-  if (!database?.[1]) {
-    throw new Error("HealthStatus.checks.database enum not found");
+  const states = new RegExp(`${dependency}:\\s*\\{[^}]*enum:\\s*\\[([^\\]]*)\\]`).exec(block);
+  if (!states?.[1]) {
+    throw new Error(`HealthStatus.checks.${dependency} enum not found`);
   }
-  return database[1].split(",").map((entry) => entry.trim());
+  return states[1].split(",").map((entry) => entry.trim());
 }
 
 export function contractHealthLiveConst(): string {
@@ -129,7 +193,7 @@ export function expectHealthStatusBody(body: unknown, httpStatus: number): void 
   }
   expect(contractHealthStatusValues()).toContain(parsed.status);
   expect(contractDependencyStates()).toContain(parsed.checks.database);
-  expect(contractDependencyStates()).toContain(parsed.checks.redis);
+  expect(contractDependencyStates("redis")).toContain(parsed.checks.redis);
   expect(parsed.status === "down").toBe(httpStatus === 503);
 }
 

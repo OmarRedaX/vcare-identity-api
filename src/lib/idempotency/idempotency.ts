@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Request, RequestHandler, Response } from "express";
 import type Redis from "ioredis";
 import { toMs } from "../../pkg/utils/time";
@@ -7,7 +7,8 @@ import { clientIp } from "../http/client-ip";
 import { captureRoute } from "../http/route-capture";
 import { logger as defaultLogger } from "../logger/logger";
 import { UUID_PATTERN } from "../request-id/request-id";
-import { isRedisReady, redis as defaultRedis, withTimeout } from "../redis/redis";
+import { redis as defaultRedis } from "../redis/redis";
+import { guardedRedisCall, redisUsable } from "../redis/redis-guard";
 import type { IdempotencyDeps, IdempotencyOptions, IdempotencyRecord } from "./types";
 
 export const IDEMPOTENCY_TTL_MS = toMs(24, "h");
@@ -15,6 +16,10 @@ export const IN_FLIGHT_TTL_MS = toMs(60, "s");
 export const IDEMPOTENCY_REDIS_TIMEOUT_MS = 100;
 
 const HEADER = "idempotency-key";
+
+/** Deletes the key only while it still holds the exact in-flight payload this request wrote. */
+const RELEASE_SCRIPT =
+  "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0";
 
 /** Stable JSON so that key order never changes the hash. */
 function stableStringify(value: unknown): string {
@@ -156,7 +161,7 @@ export function idempotency(options: IdempotencyOptions, deps?: IdempotencyDeps)
       return;
     }
 
-    if (!isRedisReady(resolved.redis)) {
+    if (!redisUsable(resolved.redis)) {
       skip("redis_unavailable", next);
       return;
     }
@@ -167,17 +172,31 @@ export function idempotency(options: IdempotencyOptions, deps?: IdempotencyDeps)
 
     const run = async (): Promise<void> => {
       const claim = async (): Promise<boolean> => {
-        const record: IdempotencyRecord = { v: 1, state: "in_flight", bodyHash };
-        const reply = await withTimeout(
-          client.set(key, JSON.stringify(record), "PX", IN_FLIGHT_TTL_MS, "NX"),
-          IDEMPOTENCY_REDIS_TIMEOUT_MS,
-        );
-        return reply === "OK";
+        const record: IdempotencyRecord = { v: 1, state: "in_flight", bodyHash, nonce: randomUUID() };
+        const payload = JSON.stringify(record);
+        const pending = client.set(key, payload, "PX", IN_FLIGHT_TTL_MS, "NX");
+        try {
+          const reply = await guardedRedisCall(client, pending, IDEMPOTENCY_REDIS_TIMEOUT_MS);
+          return reply === "OK";
+        } catch (err) {
+          // The SET cannot be cancelled: if it lands after we gave up, remove our own orphan record
+          // (compare-and-delete on the exact payload) so same-key retries are not answered 409.
+          pending.then(
+            (late) => {
+              if (late === "OK") {
+                client.eval(RELEASE_SCRIPT, 1, key, payload).catch(() => undefined);
+              }
+            },
+            () => undefined,
+          );
+          throw err;
+        }
       };
 
       const beginHandler = (): void => {
         captureResponse(res, (status, body, clientClosed) => {
-          if (clientClosed || status >= 500) {
+          // 429 is a transient refusal (e.g. HashQueueFull), not the request's outcome: never replay it.
+          if (clientClosed || status >= 500 || status === 429) {
             client.del(key).catch(() => undefined);
             return;
           }
@@ -196,12 +215,12 @@ export function idempotency(options: IdempotencyOptions, deps?: IdempotencyDeps)
       }
 
       const existing = parseRecord(
-        await withTimeout(client.get(key), IDEMPOTENCY_REDIS_TIMEOUT_MS),
+        await guardedRedisCall(client, client.get(key), IDEMPOTENCY_REDIS_TIMEOUT_MS),
       );
 
       if (existing === undefined) {
         // Expired or unparsable between SET NX and GET: drop it and try to claim once more.
-        await withTimeout(client.del(key), IDEMPOTENCY_REDIS_TIMEOUT_MS);
+        await guardedRedisCall(client, client.del(key), IDEMPOTENCY_REDIS_TIMEOUT_MS);
         if (await claim()) {
           beginHandler();
           return;

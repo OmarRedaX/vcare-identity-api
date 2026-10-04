@@ -14,13 +14,13 @@ jest.mock("argon2", () => ({
 }));
 jest.mock("bcrypt", () => ({ compare: jest.fn() }));
 
-const argon2Mock = jest.requireMock("argon2") as {
+const argon2Mock = jest.requireMock<{
   hash: jest.Mock;
   verify: jest.Mock;
   needsRehash: jest.Mock;
   argon2id: number;
-};
-const bcryptMock = jest.requireMock("bcrypt") as { compare: jest.Mock };
+}>("argon2");
+const bcryptMock = jest.requireMock<{ compare: jest.Mock }>("bcrypt");
 
 const ARGON2_HASH = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aGFzaA";
 const BCRYPT_HASH = "$2b$10$abcdefghijklmnopqrstuv";

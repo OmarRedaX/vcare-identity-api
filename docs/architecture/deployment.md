@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: accepted
 diataxis: explanation
-last_verified: 2026-10-02
+last_verified: 2026-10-04
 tags: [architecture, runtime, scaling, slo, disaster-recovery, bottlenecks, observability]
 related: [system-design, design-baseline, capacity, overview, infrastructure, runbook, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0009-availability-and-recovery-targets, adr-0013-log-derived-metrics, adr-0014-health-liveness-readiness-split, hub-deployment]
 ---
@@ -34,8 +34,8 @@ replica (Tier 2).
 The image (as built, `Dockerfile`) is `node:24-alpine`, runs as the non-root `node` user, exposes 3000 and 3100,
 defaults to `node dist/server.js`, and has no `HEALTHCHECK` (the orchestrator probes HTTP). Container settings
 the tasks need: `INTERNAL_HOST` set to the task's private interface (the default `127.0.0.1` would make the
-internal LB and `/internal/health/ready` unreachable), and `TRUST_PROXY_HOPS` equal to the proxy hops in front of
-the task (hub `deployment.md` → edge path) so rate-limit subjects use the real client IP.
+internal LB and `/internal/health/ready` unreachable), and `TRUST_PROXY_HOPS` (**required in production**, >= 1) equal to the proxy hops in front of
+the task (hub `deployment.md` → edge path) so rate-limit subjects use the real client IP; `INTERNAL_TRUST_PROXY_HOPS` is the separate hop count of the internal LB. Pool, connect and query timeouts and TCP keep-alive are set client-side (spec §15.5), so a blackholed primary is detected within seconds rather than minutes.
 
 Network rules: the public LB target group exposes only `:3000`; `:3100` is reachable only through the
 internal LB from care-api's security group (and future registered service clients); Postgres and Redis
@@ -78,7 +78,7 @@ Signing-key and client-secret rotations follow [runbook.md](../runbook.md) and a
 | 1 | **argon2 CPU/memory** on login, register/complete, reset, change, service token | ~50 ms CPU + 19 MiB per hash; libuv pool defaults to 4 threads; a burst queues and breaks login p95 < 250 ms | bounded **hash semaphore** (`HASH_CONCURRENCY` = vCPU, `HASH_QUEUE_MAX`); full queue → `429 RateLimited` + `Retry-After`, never unbounded wait; dummy verify goes through the same semaphore | autoscale on CPU and login p95; alert `LoginLatencyHigh`; **never lower argon2 parameters** |
 | 2 | **Credential stuffing** (~500 attempts/s design point) | every attempt that reaches argon2 burns CPU; distributed IPs evade per-IP limits | limiter middleware runs **before** body validation and hashing; IP+email and IP limiters; D6 fallback limiter when Redis is down | WAF rate-based rules on `/api/auth/login`, `/api/auth/register/*`, `/api/auth/forgot-password`; managed bot control; alert `AuthFailureSpike` |
 | 3 | **`refresh_tokens` churn** (160 k inserts + updates/day, 5–10 M rows) | table/index bloat, autovacuum lag, slower refresh p95 | worker purge in **batches of 5 k rows with sleeps** under an advisory lock; partial indexes on live rows keep hot paths small | per-table autovacuum tuning (`autovacuum_vacuum_scale_factor=0.02`, `autovacuum_analyze_scale_factor=0.01`); monitor dead tuples; at 10× adopt monthly partitions (new ADR) |
-| 4 | **Postgres connections and failover** | pool exhaustion under load; Multi-AZ failover drops connections ~60 s | pool per task (`DATABASE_POOL_MAX`), 2 s statement timeout, fast-fail on pool wait > 1 s, reconnect; retries only for idempotent reads | no connection proxy at this scale (add one past ~10 tasks); quarterly failover drill; alert on pool wait time |
+| 4 | **Postgres connections and failover** | pool exhaustion under load; Multi-AZ failover drops connections ~60 s | pool per task (`DATABASE_POOL_MAX`), 2 s statement timeout, fast-fail on pool wait > 1 s, 2 s connect and 3 s query timeouts with TCP keep-alive, reconnect on the next acquire; the readiness probe has its own 1-connection pool; retries only for idempotent reads | no connection proxy at this scale (add one past ~10 tasks); quarterly failover drill; alert on pool wait time |
 | 5 | **`/internal/users` fan-in** from Care search spikes | cache misses in Care hit Identity together | single `= ANY($1)` PK query, ≤ 100 ids, no outbound calls, no Redis on the path | Care's 300 s cache absorbs ~80 %; internal LB isolates internal traffic from public; alert `InternalUsersLatencyHigh` |
 | 6 | **JWKS availability** | Care re-fetches the key set every 5 min; if it can't for > 1 h (its stale-if-error cap), every Care request fails — and a token signed with a new `kid` fails as soon as the outage starts | JWKS built once at boot, served from memory | edge caches `/.well-known/jwks.json` (`max-age=300`); synthetic probe alert `JwksUnavailable`; JWKS survives origin blips from edge cache |
 | 7 | **Outbox lag / email provider slowness** | registration codes arrive late (10 min TTL) and users abandon sign-up | claim 20 jobs with `FOR UPDATE SKIP LOCKED`; provider call timeout 5 s; exponential backoff; `dead` after 8 attempts; code TTL starts **at send time** | alert when oldest pending job > 2 min; scale worker to 2; secondary email provider is a follow-up |
@@ -103,13 +103,13 @@ metrics below arrive with their modules.
 | `refresh_token_reuse_detected`, `refresh_token_grace_reuse` | — | `RefreshReuseSpike`; grace-window health |
 | `rate_limiter_degraded` | `limiter` | `RateLimiterDegraded` |
 | `outbox_oldest_pending_age_s`, `outbox_dead_jobs` | `type` | `OutboxLagHigh`, `OutboxDeadJobs` |
-| `db_pool_wait_ms`, `db_pool_in_use` | — | bottleneck 4 |
+| `db_pool_wait_ms`, `db_pool_in_use` | — | bottleneck 4 (**planned, not emitted yet**, foundation spec §13) |
 | `service_token_denied` | `reason` | caller misconfiguration |
 
 **Alerts (added to the runbook set):** `LoginLatencyHigh`, `RefreshReuseSpike`, `AuthFailureSpike`,
 `InternalUsersLatencyHigh`, `JwksUnavailable`, `HealthCheckFailing` (existing) plus `OutboxLagHigh`
 (oldest pending > 2 min for 5 min), `OutboxDeadJobs` (> 0), `RateLimiterDegraded` (any for 2 min),
-`DbPoolSaturated` (wait p95 > 200 ms for 5 min), `AvailabilityBudgetBurn` (5xx + readiness failures burning
+`DbPoolSaturated` (planned, needs the unemitted pool metrics; wait p95 > 200 ms for 5 min), `AvailabilityBudgetBurn` (5xx + readiness failures burning
 the 99.95 % budget at > 2× rate over 1 h).
 
 ## 6. New configuration introduced by this baseline

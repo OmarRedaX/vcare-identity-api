@@ -24,15 +24,13 @@ jest.mock("../../../../src/app/auth/repository/user.repo", () => ({
 }));
 jest.mock("../../../../src/lib/outbox/outbox.repo", () => ({ enqueue: jest.fn() }));
 
-const challenges = jest.requireMock(
-  "../../../../src/app/auth/repository/registration-challenge.repo",
-) as MockedModule<typeof import("../../../../src/app/auth/repository/registration-challenge.repo")>;
-const users = jest.requireMock("../../../../src/app/auth/repository/user.repo") as MockedModule<
+const challenges = jest.requireMock<MockedModule<typeof import("../../../../src/app/auth/repository/registration-challenge.repo")>>("../../../../src/app/auth/repository/registration-challenge.repo");
+const users = jest.requireMock<MockedModule<
   typeof import("../../../../src/app/auth/repository/user.repo")
->;
-const outbox = jest.requireMock("../../../../src/lib/outbox/outbox.repo") as MockedModule<
+>>("../../../../src/app/auth/repository/user.repo");
+const outbox = jest.requireMock<MockedModule<
   typeof import("../../../../src/lib/outbox/outbox.repo")
->;
+>>("../../../../src/lib/outbox/outbox.repo");
 
 const PEPPER = "synthetic-otp-pepper-value-0123456789abcdef";
 const NOW = new Date("2026-09-18T10:00:00.000Z");
@@ -197,13 +195,13 @@ describe("RegistrationService.complete", () => {
   it("should hash the password before opening the transaction when a registration is completed", async () => {
     challenges.findLatestOpenForUpdate.mockResolvedValue(challenge());
     const order: string[] = [];
-    (hasher.hash as jest.Mock).mockImplementation(async () => {
+    (hasher.hash as jest.Mock).mockImplementation(() => {
       order.push("hash");
-      return PASSWORD_HASH;
+      return Promise.resolve(PASSWORD_HASH);
     });
-    (db.db.transaction as jest.Mock).mockImplementation(async () => {
+    (db.db.transaction as jest.Mock).mockImplementation(() => {
       order.push("transaction");
-      return db.trx;
+      return Promise.resolve(db.trx);
     });
 
     await service.complete(input());

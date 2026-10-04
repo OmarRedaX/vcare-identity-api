@@ -15,15 +15,13 @@ jest.mock("../../../../src/app/auth/repository/registration-challenge.repo", () 
 }));
 jest.mock("../../../../src/lib/outbox/outbox.repo", () => ({ deleteFinishedBatch: jest.fn() }));
 
-const lock = jest.requireMock("../../../../src/lib/knex/advisory-lock") as MockedModule<
+const lock = jest.requireMock<MockedModule<
   typeof import("../../../../src/lib/knex/advisory-lock")
->;
-const refreshTokens = jest.requireMock(
-  "../../../../src/app/auth/repository/refresh-token.repo",
-) as MockedModule<typeof import("../../../../src/app/auth/repository/refresh-token.repo")>;
-const outbox = jest.requireMock("../../../../src/lib/outbox/outbox.repo") as MockedModule<
+>>("../../../../src/lib/knex/advisory-lock");
+const refreshTokens = jest.requireMock<MockedModule<typeof import("../../../../src/app/auth/repository/refresh-token.repo")>>("../../../../src/app/auth/repository/refresh-token.repo");
+const outbox = jest.requireMock<MockedModule<
   typeof import("../../../../src/lib/outbox/outbox.repo")
->;
+>>("../../../../src/lib/outbox/outbox.repo");
 
 function logSink(): { logger: Logger; lines: () => Record<string, unknown>[] } {
   const written: string[] = [];
@@ -84,7 +82,7 @@ describe("PurgeService.runAll", () => {
       "outbox_jobs_dead",
     ]);
     expect(lock.withAdvisoryXactLock).toHaveBeenCalledTimes(5);
-    const keys = lock.withAdvisoryXactLock.mock.calls.map((call) => call[1] as bigint);
+    const keys = (lock.withAdvisoryXactLock.mock.calls as unknown[][]).map((call) => call[1] as bigint);
     expect(new Set(keys).size).toBe(5);
   });
 

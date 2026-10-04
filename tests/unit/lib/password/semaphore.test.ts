@@ -45,7 +45,7 @@ describe("Semaphore", () => {
     const first = semaphore.run(() => held.promise);
     const second = semaphore.run(() => queued.promise);
 
-    await expect(semaphore.run(async () => undefined)).rejects.toBe(HashQueueFull);
+    await expect(semaphore.run(() => Promise.resolve(undefined))).rejects.toBe(HashQueueFull);
     expect(HashQueueFull).toBeInstanceOf(AppError);
     expect(HashQueueFull).toMatchObject({ code: "RateLimited", status: 429, retryAfterSeconds: 1 });
 
@@ -60,7 +60,7 @@ describe("Semaphore", () => {
     await expect(
       semaphore.run(() => Promise.reject(new Error("boom"))),
     ).rejects.toThrow("boom");
-    await expect(semaphore.run(async () => "after")).resolves.toBe("after");
+    await expect(semaphore.run(() => Promise.resolve("after"))).resolves.toBe("after");
     expect(semaphore.heldCount()).toBe(0);
   });
 
@@ -73,11 +73,13 @@ describe("Semaphore", () => {
       order.push(1);
       await gate.promise;
     });
-    const second = semaphore.run(async () => {
+    const second = semaphore.run(() => {
       order.push(2);
+      return Promise.resolve();
     });
-    const third = semaphore.run(async () => {
+    const third = semaphore.run(() => {
       order.push(3);
+      return Promise.resolve();
     });
 
     gate.resolve();

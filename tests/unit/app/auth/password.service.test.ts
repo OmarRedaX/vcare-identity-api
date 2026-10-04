@@ -26,15 +26,13 @@ jest.mock("../../../../src/app/auth/repository/user.repo", () => ({
 }));
 jest.mock("../../../../src/lib/outbox/outbox.repo", () => ({ enqueue: jest.fn() }));
 
-const resets = jest.requireMock(
-  "../../../../src/app/auth/repository/password-reset.repo",
-) as MockedModule<typeof import("../../../../src/app/auth/repository/password-reset.repo")>;
-const users = jest.requireMock("../../../../src/app/auth/repository/user.repo") as MockedModule<
+const resets = jest.requireMock<MockedModule<typeof import("../../../../src/app/auth/repository/password-reset.repo")>>("../../../../src/app/auth/repository/password-reset.repo");
+const users = jest.requireMock<MockedModule<
   typeof import("../../../../src/app/auth/repository/user.repo")
->;
-const outbox = jest.requireMock("../../../../src/lib/outbox/outbox.repo") as MockedModule<
+>>("../../../../src/app/auth/repository/user.repo");
+const outbox = jest.requireMock<MockedModule<
   typeof import("../../../../src/lib/outbox/outbox.repo")
->;
+>>("../../../../src/lib/outbox/outbox.repo");
 
 const PEPPER = "synthetic-otp-pepper-value-0123456789abcdef";
 const NOW = new Date("2026-09-18T10:00:00.000Z");
@@ -105,26 +103,37 @@ function reset(overrides: Partial<PasswordReset> = {}): PasswordReset {
 
 let sink: ReturnType<typeof logSink>;
 let trx: { commit: jest.Mock; rollback: jest.Mock };
-let db: Knex;
-let hasher: PasswordHasher;
-let sessions: SessionService;
+let dbMock: { transaction: jest.Mock };
+let hasherMock: { hash: jest.Mock; verify: jest.Mock; verifyDummy: jest.Mock };
+let sessionsMock: {
+  revokeAllForUser: jest.Mock;
+  revokeAllExceptFamily: jest.Mock;
+  familyOfOwnToken: jest.Mock;
+};
 let service: PasswordService;
 
 beforeEach(() => {
   sink = logSink();
   trx = { commit: jest.fn().mockResolvedValue(undefined), rollback: jest.fn().mockResolvedValue(undefined) };
-  db = { transaction: jest.fn().mockResolvedValue(trx) } as unknown as Knex;
-  hasher = {
+  dbMock = { transaction: jest.fn().mockResolvedValue(trx) };
+  hasherMock = {
     hash: jest.fn().mockResolvedValue(NEW_HASH),
     verify: jest.fn().mockResolvedValue({ ok: true, needsRehash: false }),
     verifyDummy: jest.fn(),
-  } as unknown as PasswordHasher;
-  sessions = {
+  };
+  sessionsMock = {
     revokeAllForUser: jest.fn().mockResolvedValue(3),
     revokeAllExceptFamily: jest.fn().mockResolvedValue(2),
     familyOfOwnToken: jest.fn().mockResolvedValue(undefined),
-  } as unknown as SessionService;
-  service = new PasswordService(db, sink.logger, clock, env, hasher, sessions);
+  };
+  service = new PasswordService(
+    dbMock as unknown as Knex,
+    sink.logger,
+    clock,
+    env,
+    hasherMock as unknown as PasswordHasher,
+    sessionsMock as unknown as SessionService,
+  );
 
   resets.insertReset.mockResolvedValue(31);
   resets.invalidateOpenForUser.mockResolvedValue(1);
@@ -154,7 +163,7 @@ describe("PasswordService.forgot", () => {
 
     await expect(service.forgot(EMAIL, REQUEST_ID)).resolves.toBeUndefined();
 
-    expect(db.transaction).not.toHaveBeenCalled();
+    expect(dbMock.transaction).not.toHaveBeenCalled();
     expect(outbox.enqueue).not.toHaveBeenCalled();
   });
 
@@ -187,7 +196,7 @@ describe("PasswordService.reset", () => {
     expect(users.updatePasswordHash).toHaveBeenCalledWith(1042, NEW_HASH, trx);
     expect(resets.markUsed).toHaveBeenCalledWith(31, trx);
     expect(resets.invalidateOpenForUser).toHaveBeenCalledWith(1042, trx);
-    expect(sessions.revokeAllForUser).toHaveBeenCalledWith(trx, 1042, RevokedReason.PasswordReset);
+    expect(sessionsMock.revokeAllForUser).toHaveBeenCalledWith(trx, 1042, RevokedReason.PasswordReset);
     expect(trx.commit).toHaveBeenCalledTimes(1);
     expect(sink.lines()).toContainEqual(
       expect.objectContaining({ message: "password_reset_completed", userId: 1042, revokedSessions: 3 }),
@@ -196,20 +205,20 @@ describe("PasswordService.reset", () => {
 
   it("should hash the new password before the transaction on every outcome, unknown email included", async () => {
     const order: string[] = [];
-    (hasher.hash as jest.Mock).mockImplementation(async () => {
+    hasherMock.hash.mockImplementation(() => {
       order.push("hash");
-      return NEW_HASH;
+      return Promise.resolve(NEW_HASH);
     });
-    (db.transaction as jest.Mock).mockImplementation(async () => {
+    dbMock.transaction.mockImplementation(() => {
       order.push("transaction");
-      return trx;
+      return Promise.resolve(trx);
     });
     users.findLiveByEmail.mockResolvedValue(undefined);
 
     await expect(service.reset(input)).rejects.toMatchObject({ code: "ValidationFailed" });
 
     expect(order).toEqual(["hash", "transaction"]);
-    expect(hasher.hash).toHaveBeenCalledWith(NEW_PASSWORD);
+    expect(hasherMock.hash).toHaveBeenCalledWith(NEW_PASSWORD);
   });
 
   it("should answer the identical 400 field code for every failure reason", async () => {
@@ -283,7 +292,7 @@ describe("PasswordService.reset", () => {
     await expect(service.reset(input)).rejects.toMatchObject({ code: "ValidationFailed" });
 
     expect(resets.markUsed).not.toHaveBeenCalled();
-    expect(sessions.revokeAllForUser).not.toHaveBeenCalled();
+    expect(sessionsMock.revokeAllForUser).not.toHaveBeenCalled();
     expect(sink.lines()).toContainEqual(
       expect.objectContaining({ message: "password_reset_failed", outcome: "no_reset" }),
     );
@@ -324,13 +333,13 @@ describe("PasswordService.change", () => {
 
   it("should keep the caller's own family and revoke the others when the current password is right", async () => {
     users.findLiveById.mockResolvedValue(user());
-    (sessions.familyOfOwnToken as jest.Mock).mockResolvedValue(FAMILY);
+    sessionsMock.familyOfOwnToken.mockResolvedValue(FAMILY);
 
     await service.change(input);
 
-    expect(sessions.familyOfOwnToken).toHaveBeenCalledWith(input.presentedRefreshToken, 1042);
+    expect(sessionsMock.familyOfOwnToken).toHaveBeenCalledWith(input.presentedRefreshToken, 1042);
     expect(users.updatePasswordHash).toHaveBeenCalledWith(1042, NEW_HASH, trx);
-    expect(sessions.revokeAllExceptFamily).toHaveBeenCalledWith(
+    expect(sessionsMock.revokeAllExceptFamily).toHaveBeenCalledWith(
       trx,
       1042,
       FAMILY,
@@ -348,11 +357,11 @@ describe("PasswordService.change", () => {
 
   it("should revoke every family when no cookie is sent or the cookie belongs to another user", async () => {
     users.findLiveById.mockResolvedValue(user());
-    (sessions.familyOfOwnToken as jest.Mock).mockResolvedValue(undefined);
+    sessionsMock.familyOfOwnToken.mockResolvedValue(undefined);
 
     await service.change({ ...input, presentedRefreshToken: undefined });
 
-    expect(sessions.revokeAllExceptFamily).toHaveBeenCalledWith(
+    expect(sessionsMock.revokeAllExceptFamily).toHaveBeenCalledWith(
       trx,
       1042,
       undefined,
@@ -365,7 +374,7 @@ describe("PasswordService.change", () => {
 
   it("should throw InvalidCredentials when the current password is wrong", async () => {
     users.findLiveById.mockResolvedValue(user());
-    (hasher.verify as jest.Mock).mockResolvedValue({ ok: false, needsRehash: false });
+    hasherMock.verify.mockResolvedValue({ ok: false, needsRehash: false });
 
     await expect(service.change(input)).rejects.toMatchObject({
       code: "InvalidCredentials",
@@ -384,7 +393,7 @@ describe("PasswordService.change", () => {
       code: "AccountSuspended",
       status: 403,
     });
-    expect(hasher.verify).not.toHaveBeenCalled();
+    expect(hasherMock.verify).not.toHaveBeenCalled();
   });
 
   it("should throw Unauthorized when the subject no longer has a live row", async () => {

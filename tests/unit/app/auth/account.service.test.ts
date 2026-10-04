@@ -8,9 +8,9 @@ jest.mock("../../../../src/app/auth/repository/user.repo", () => ({
   updateProfileUnlessSuspended: jest.fn(),
 }));
 
-const users = jest.requireMock("../../../../src/app/auth/repository/user.repo") as MockedModule<
+const users = jest.requireMock<MockedModule<
   typeof import("../../../../src/app/auth/repository/user.repo")
->;
+>>("../../../../src/app/auth/repository/user.repo");
 
 const NOW = new Date("2026-09-18T10:00:00.000Z");
 const EMAIL = "amira.patient@example.test";

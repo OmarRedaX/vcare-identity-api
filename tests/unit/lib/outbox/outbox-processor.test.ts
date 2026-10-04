@@ -14,14 +14,14 @@ jest.mock("../../../../src/lib/outbox/outbox.repo", () => ({
   oldestDuePendingAgeSeconds: jest.fn(),
 }));
 
-const repo = jest.requireMock("../../../../src/lib/outbox/outbox.repo") as {
+const repo = jest.requireMock<{
   claim: jest.Mock;
   reclaimExpiredLeases: jest.Mock;
   markDone: jest.Mock;
   markRetry: jest.Mock;
   markDead: jest.Mock;
   oldestDuePendingAgeSeconds: jest.Mock;
-};
+}>("../../../../src/lib/outbox/outbox.repo");
 
 const REQUEST_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
@@ -90,7 +90,7 @@ describe("OutboxProcessor.tick", () => {
   it("should reclaim expired leases and warn when a previous worker died mid-job", async () => {
     repo.reclaimExpiredLeases.mockResolvedValue(3);
 
-    await build(async () => "sent", sink).tick(new AbortController().signal);
+    await build(() => Promise.resolve("sent"), sink).tick(new AbortController().signal);
 
     expect(repo.reclaimExpiredLeases).toHaveBeenCalledWith(20, 8, db);
     expect(sink.lines()).toContainEqual(
@@ -101,7 +101,7 @@ describe("OutboxProcessor.tick", () => {
   it("should mark a job done and log outbox_job_sent when the handler reports sent", async () => {
     repo.claim.mockResolvedValue([job()]);
 
-    await build(async () => "sent", sink).tick(new AbortController().signal);
+    await build(() => Promise.resolve("sent"), sink).tick(new AbortController().signal);
 
     expect(repo.markDone).toHaveBeenCalledWith(1, db);
     expect(sink.lines()).toContainEqual(
@@ -112,7 +112,7 @@ describe("OutboxProcessor.tick", () => {
   it("should mark a job done and log outbox_job_skipped when the handler reports skipped", async () => {
     repo.claim.mockResolvedValue([job()]);
 
-    await build(async () => "skipped", sink).tick(new AbortController().signal);
+    await build(() => Promise.resolve("skipped"), sink).tick(new AbortController().signal);
 
     expect(repo.markDone).toHaveBeenCalledWith(1, db);
     expect(sink.lines()).toContainEqual(expect.objectContaining({ message: "outbox_job_skipped", jobId: 1 }));
@@ -171,7 +171,7 @@ describe("OutboxProcessor.tick", () => {
   it("should mark dead with UnknownJobType when no handler is registered for the type", async () => {
     repo.claim.mockResolvedValue([job({ type: "send_password_reset" })]);
 
-    await build(async () => "sent", sink).tick(new AbortController().signal);
+    await build(() => Promise.resolve("sent"), sink).tick(new AbortController().signal);
 
     expect(repo.markDead).toHaveBeenCalledWith(1, "UnknownJobType", db);
   });
@@ -180,9 +180,9 @@ describe("OutboxProcessor.tick", () => {
     repo.claim.mockResolvedValue([job()]);
     let seen: string | undefined;
 
-    await build(async () => {
+    await build(() => {
       seen = getRequestContext()?.requestId;
-      return "sent";
+      return Promise.resolve("sent");
     }, sink).tick(new AbortController().signal);
 
     expect(seen).toBe(REQUEST_ID);
@@ -195,10 +195,10 @@ describe("OutboxProcessor.tick", () => {
     const started: number[] = [];
 
     await build(
-      async (claimed) => {
+      (claimed) => {
         started.push(claimed.id);
         controller.abort();
-        return "sent";
+        return Promise.resolve("sent");
       },
       sink,
       { concurrency: 1 },
@@ -211,13 +211,13 @@ describe("OutboxProcessor.tick", () => {
   it("should report the oldest pending age as a metric when a tick runs", async () => {
     repo.oldestDuePendingAgeSeconds.mockResolvedValue(12);
 
-    await build(async () => "sent", sink).tick(new AbortController().signal);
+    await build(() => Promise.resolve("sent"), sink).tick(new AbortController().signal);
 
     expect(sink.lines()).toContainEqual(expect.objectContaining({ outbox_oldest_pending_age_s: 12 }));
   });
 
   it("should not claim or finish anything when no job is due", async () => {
-    await build(async () => "sent", sink).tick(new AbortController().signal);
+    await build(() => Promise.resolve("sent"), sink).tick(new AbortController().signal);
 
     expect(repo.markDone).not.toHaveBeenCalled();
     expect(repo.markRetry).not.toHaveBeenCalled();

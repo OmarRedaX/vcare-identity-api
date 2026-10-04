@@ -20,7 +20,7 @@ let fetchMock: jest.Mock;
 
 beforeEach(() => {
   fetchMock = jest.fn();
-  globalThis.fetch = fetchMock as unknown as typeof fetch;
+  globalThis.fetch = fetchMock;
 });
 
 afterAll(() => {
@@ -56,7 +56,7 @@ describe("ResendEmailAdapter.send", () => {
       Authorization: "Bearer synthetic-provider-key",
       "Content-Type": "application/json",
     });
-    expect(JSON.parse(String(init.body))).toEqual({
+    expect(JSON.parse(init.body as string)).toEqual({
       from: "no-reply@example.test",
       to: ["amira.patient@example.test"],
       subject: MESSAGE.subject,

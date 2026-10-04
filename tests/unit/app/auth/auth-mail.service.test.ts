@@ -19,15 +19,11 @@ jest.mock("../../../../src/app/auth/repository/password-reset.repo", () => ({
 }));
 jest.mock("../../../../src/app/auth/repository/user.repo", () => ({ findLiveById: jest.fn() }));
 
-const challenges = jest.requireMock(
-  "../../../../src/app/auth/repository/registration-challenge.repo",
-) as MockedModule<typeof import("../../../../src/app/auth/repository/registration-challenge.repo")>;
-const resets = jest.requireMock(
-  "../../../../src/app/auth/repository/password-reset.repo",
-) as MockedModule<typeof import("../../../../src/app/auth/repository/password-reset.repo")>;
-const users = jest.requireMock("../../../../src/app/auth/repository/user.repo") as MockedModule<
+const challenges = jest.requireMock<MockedModule<typeof import("../../../../src/app/auth/repository/registration-challenge.repo")>>("../../../../src/app/auth/repository/registration-challenge.repo");
+const resets = jest.requireMock<MockedModule<typeof import("../../../../src/app/auth/repository/password-reset.repo")>>("../../../../src/app/auth/repository/password-reset.repo");
+const users = jest.requireMock<MockedModule<
   typeof import("../../../../src/app/auth/repository/user.repo")
->;
+>>("../../../../src/app/auth/repository/user.repo");
 
 const PEPPER = "synthetic-otp-pepper-value-0123456789abcdef";
 const APP_BASE_URL = "https://app.example.test";
@@ -152,12 +148,14 @@ describe("send_registration_code", () => {
   it("should commit the hash before sending so a crash re-sends a superseding code", async () => {
     challenges.findByIdForUpdate.mockResolvedValue(challenge());
     const order: string[] = [];
-    trx.commit.mockImplementation(async () => {
+    trx.commit.mockImplementation(() => {
       order.push("commit");
+      return Promise.resolve();
     });
     const failing = new AuthMailService(db, env, {
-      send: async () => {
+      send: () => {
         order.push("send");
+        return Promise.resolve();
       },
     });
 

@@ -103,7 +103,7 @@ needs a new or changed endpoint in care-service.
 ### K — verification and docs (steps 12–14)
 - [x] K1 (verify) `npm run typecheck` and `npm run lint` clean
 - [x] K2 (tests) ← `/write-tests auth` owns `tests/` (spec §11); green 2026-10-04: 472 unit, 162 integration (2 win32-skipped signal tests)
-- [ ] K3 (manual-qa) ← `/manual-qa auth` (spec §12.3)
+- [ ] K3 (manual-qa) ← `/manual-qa auth` (spec §12.3) — run 2026-10-04: 253 pass / 3 fail, 3 open defects (D-1 `+01:00` accepted as timezone, D-2 malformed JSON 400 and D-3 OPTIONS lack `no-store`); see [manual-qa.md](./manual-qa.md)
 - [x] K4 (docs) `docs/service-card.md`, `docs/INDEX.md` rows, ADR index rows; remaining doc fixes (spec §12.2) → `/update-docs auth`
 
 **Counts:** 50 tasks - 48 done, 0 in progress, 2 todo.

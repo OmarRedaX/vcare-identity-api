@@ -178,7 +178,7 @@ describe("POST /api/auth/reset-password", () => {
 
     expect((await login(user.email, TEST_PASSWORD)).status).toBe(401);
     expect((await login(user.email, NEW_PASSWORD)).status).toBe(200);
-    const stored = await db("users").select("status").where("id", user.id).first();
+    const stored = await db("users").select("status").where("id", user.id).first<Record<string, unknown> | undefined>();
     expect(stored?.status).toBe("active");
   });
 
@@ -263,8 +263,8 @@ describe("POST /api/auth/reset-password", () => {
     });
 
     expect(unknownEmail.status).toBe(wrongCode.status);
-    expect({ ...unknownEmail.body.error, requestId: null }).toEqual({
-      ...wrongCode.body.error,
+    expect({ ...(unknownEmail.body as { error: object }).error, requestId: null }).toEqual({
+      ...(wrongCode.body as { error: object }).error,
       requestId: null,
     });
     expect(unknownEmail.headers["cache-control"]).toBe(wrongCode.headers["cache-control"]);

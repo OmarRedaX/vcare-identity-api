@@ -5,7 +5,7 @@ service: identity-service
 module: auth
 status: built
 diataxis: reference
-last_verified: 2026-09-18
+last_verified: 2026-10-04
 tags: [tasks, auth, registration, refresh-token, jwks, outbox]
 related: [auth-brainstorm, auth-spec, users-tasks]
 ---
@@ -102,7 +102,7 @@ needs a new or changed endpoint in care-service.
 
 ### K — verification and docs (steps 12–14)
 - [x] K1 (verify) `npm run typecheck` and `npm run lint` clean
-- [ ] K2 (tests) ← `/write-tests auth` owns `tests/` (spec §11)
+- [x] K2 (tests) ← `/write-tests auth` owns `tests/` (spec §11); green 2026-10-04: 472 unit, 162 integration (2 win32-skipped signal tests)
 - [ ] K3 (manual-qa) ← `/manual-qa auth` (spec §12.3)
 - [x] K4 (docs) `docs/service-card.md`, `docs/INDEX.md` rows, ADR index rows; remaining doc fixes (spec §12.2) → `/update-docs auth`
 

@@ -128,14 +128,14 @@ describe("POST /api/auth/change-password", () => {
     expect(response.status).toBe(204);
     expect((await tokenRows(caller.id)).every((row) => row.revoked_at !== null)).toBe(true);
     expect((await tokenRows(stranger.id)).every((row) => row.revoked_at === null)).toBe(true);
-    const strangerHash = await db("users").select("password_hash").where("id", stranger.id).first();
+    const strangerHash = await db("users").select("password_hash").where("id", stranger.id).first<Record<string, unknown> | undefined>();
     expect((await login(stranger.email, TEST_PASSWORD)).status).toBe(200);
     expect(strangerHash?.password_hash).toBeDefined();
   });
 
   it("should return 401 InvalidCredentials and change nothing when the current password is wrong", async () => {
     const user = await seedUser({ email: "wrongcurrent.change@example.test" });
-    const before = await db("users").select("password_hash").where("id", user.id).first();
+    const before = await db("users").select("password_hash").where("id", user.id).first<Record<string, unknown> | undefined>();
 
     const response = await changePassword(await signAccessToken(user), {
       currentPassword: "Not-The-Passw0rd",
@@ -144,7 +144,7 @@ describe("POST /api/auth/change-password", () => {
 
     expect(response.status).toBe(401);
     expectErrorEnvelope(response.body, "InvalidCredentials");
-    const after = await db("users").select("password_hash").where("id", user.id).first();
+    const after = await db("users").select("password_hash").where("id", user.id).first<Record<string, unknown> | undefined>();
     expect(after?.password_hash).toBe(before?.password_hash);
   });
 
@@ -181,7 +181,12 @@ describe("POST /api/auth/change-password", () => {
 
     expect(response.status).toBe(403);
     expectErrorEnvelope(response.body, "AccountSuspended");
-    expect((await login(user.email, NEW_PASSWORD)).status).toBe(403);
+    // The refused change must not have touched the hash: the new password is simply wrong (401), while the
+    // original, correct password is refused only because the account is suspended (403).
+    expect((await login(user.email, NEW_PASSWORD)).status).toBe(401);
+    const original = await login(user.email, TEST_PASSWORD);
+    expect(original.status).toBe(403);
+    expectErrorEnvelope(original.body, "AccountSuspended");
   });
 
   it("should serve pending and rejected accounts when they change their password", async () => {

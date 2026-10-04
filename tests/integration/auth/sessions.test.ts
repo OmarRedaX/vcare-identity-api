@@ -108,7 +108,7 @@ describe("POST /api/auth/login", () => {
     const response = await login(user.email);
     const token = refreshTokenFrom(response) ?? "";
 
-    const stored = await db("refresh_tokens").select("token_hash", "expires_at").first();
+    const stored = await db("refresh_tokens").select("token_hash", "expires_at").first<Record<string, unknown> | undefined>();
     expect(stored?.token_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(stored?.token_hash).not.toContain(token);
     const days = (new Date(String(stored?.expires_at)).getTime() - Date.now()) / 86_400_000;
@@ -126,7 +126,7 @@ describe("POST /api/auth/login", () => {
     expect(wrong.status).toBe(401);
     expectErrorEnvelope(unknown.body, "InvalidCredentials");
     expectErrorEnvelope(wrong.body, "InvalidCredentials");
-    expect({ ...unknown.body.error, requestId: null }).toEqual({ ...wrong.body.error, requestId: null });
+    expect({ ...(unknown.body as { error: object }).error, requestId: null }).toEqual({ ...(wrong.body as { error: object }).error, requestId: null });
     expect(refreshCookieHeader(unknown)).toBeUndefined();
     expect(await tokenRows()).toHaveLength(0);
   });
@@ -205,7 +205,7 @@ describe("POST /api/auth/login", () => {
     const response = await login(user.email);
 
     expect(response.status).toBe(200);
-    const stored = await db("users").select("password_hash").where("id", user.id).first();
+    const stored = await db("users").select("password_hash").where("id", user.id).first<Record<string, unknown> | undefined>();
     expect(String(stored?.password_hash)).toMatch(/^\$argon2id\$/);
 
     const again = await login(user.email);
@@ -226,7 +226,7 @@ describe("POST /api/auth/login", () => {
     const rows = await tokenRows();
     expect(new Set(rows.map((row) => row.family_id)).size).toBe(2);
 
-    const stored = await (redis as Redis).keys("idem:*");
+    const stored = await redis.keys("idem:*");
     expect(stored.filter((storedKey) => storedKey.includes("/api/auth/login"))).toEqual([]);
   });
 

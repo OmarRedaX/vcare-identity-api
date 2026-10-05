@@ -152,8 +152,20 @@ export class PasswordService {
     const trx = await this.db.transaction();
     let revokedSessions: number;
     try {
+      // Verification happened before this transaction. A reset, deletion, or suspension may have
+      // committed meanwhile, so decide against the current row while holding its lock.
+      const locked = await users.findLiveByIdForUpdate(user.id, trx);
+      if (locked === undefined) {
+        throw Unauthorized;
+      }
+      if (locked.passwordHash !== user.passwordHash) {
+        this.logger.warn("password_change_failed", { userId: user.id, reason: "credentials_changed" });
+        throw InvalidCredentials;
+      }
+      if (locked.isSuspended()) {
+        throw AccountSuspended;
+      }
       if ((await users.updatePasswordHash(user.id, passwordHash, trx)) === 0) {
-        await trx.rollback();
         throw Unauthorized;
       }
       revokedSessions = await this.sessions.revokeAllExceptFamily(

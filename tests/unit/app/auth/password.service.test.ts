@@ -22,6 +22,7 @@ jest.mock("../../../../src/app/auth/repository/password-reset.repo", () => ({
 jest.mock("../../../../src/app/auth/repository/user.repo", () => ({
   findLiveByEmail: jest.fn(),
   findLiveById: jest.fn(),
+  findLiveByIdForUpdate: jest.fn(),
   updatePasswordHash: jest.fn(),
 }));
 jest.mock("../../../../src/lib/outbox/outbox.repo", () => ({ enqueue: jest.fn() }));
@@ -140,6 +141,7 @@ beforeEach(() => {
   resets.recordFailedAttempt.mockResolvedValue(1);
   resets.markUsed.mockResolvedValue(1);
   users.updatePasswordHash.mockResolvedValue(1);
+  users.findLiveByIdForUpdate.mockResolvedValue(user());
 });
 
 describe("PasswordService.forgot", () => {
@@ -338,6 +340,7 @@ describe("PasswordService.change", () => {
     await service.change(input);
 
     expect(sessionsMock.familyOfOwnToken).toHaveBeenCalledWith(input.presentedRefreshToken, 1042);
+    expect(users.findLiveByIdForUpdate).toHaveBeenCalledWith(1042, trx);
     expect(users.updatePasswordHash).toHaveBeenCalledWith(1042, NEW_HASH, trx);
     expect(sessionsMock.revokeAllExceptFamily).toHaveBeenCalledWith(
       trx,
@@ -407,7 +410,56 @@ describe("PasswordService.change", () => {
     users.updatePasswordHash.mockResolvedValue(0);
 
     await expect(service.change(input)).rejects.toMatchObject({ code: "Unauthorized" });
-    expect(trx.rollback).toHaveBeenCalled();
+    expect(trx.rollback).toHaveBeenCalledTimes(1);
+    expect(trx.commit).not.toHaveBeenCalled();
+  });
+
+  it("should refuse the change when the password hash changed after verification", async () => {
+    users.findLiveById.mockResolvedValue(user());
+    users.findLiveByIdForUpdate.mockResolvedValue(user({ passwordHash: NEW_HASH }));
+
+    await expect(service.change(input)).rejects.toMatchObject({
+      code: "InvalidCredentials",
+      status: 401,
+    });
+
+    expect(users.updatePasswordHash).not.toHaveBeenCalled();
+    expect(sessionsMock.revokeAllExceptFamily).not.toHaveBeenCalled();
+    expect(trx.rollback).toHaveBeenCalledTimes(1);
+    expect(trx.commit).not.toHaveBeenCalled();
+    expect(sink.lines()).toContainEqual(
+      expect.objectContaining({
+        message: "password_change_failed",
+        userId: 1042,
+        reason: "credentials_changed",
+      }),
+    );
+  });
+
+  it("should refuse the change when the account was soft-deleted after verification", async () => {
+    users.findLiveById.mockResolvedValue(user());
+    users.findLiveByIdForUpdate.mockResolvedValue(undefined);
+
+    await expect(service.change(input)).rejects.toMatchObject({ code: "Unauthorized", status: 401 });
+
+    expect(users.updatePasswordHash).not.toHaveBeenCalled();
+    expect(sessionsMock.revokeAllExceptFamily).not.toHaveBeenCalled();
+    expect(trx.rollback).toHaveBeenCalledTimes(1);
+    expect(trx.commit).not.toHaveBeenCalled();
+  });
+
+  it("should refuse the change when the account was suspended after verification", async () => {
+    users.findLiveById.mockResolvedValue(user());
+    users.findLiveByIdForUpdate.mockResolvedValue(user({ status: "suspended" }));
+
+    await expect(service.change(input)).rejects.toMatchObject({
+      code: "AccountSuspended",
+      status: 403,
+    });
+
+    expect(users.updatePasswordHash).not.toHaveBeenCalled();
+    expect(sessionsMock.revokeAllExceptFamily).not.toHaveBeenCalled();
+    expect(trx.rollback).toHaveBeenCalledTimes(1);
     expect(trx.commit).not.toHaveBeenCalled();
   });
 

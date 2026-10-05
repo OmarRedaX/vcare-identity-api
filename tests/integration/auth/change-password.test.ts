@@ -4,6 +4,7 @@ import { db } from "../../../src/lib/knex/knex";
 import { buildTestApps } from "../../helpers/app";
 import {
   cookieFor,
+  hashPassword,
   refreshTokenFrom,
   seedUser,
   setCookies,
@@ -52,6 +53,20 @@ function changePassword(
 
 function tokenRows(userId: number): Promise<TokenRow[]> {
   return db<TokenRow>("refresh_tokens").select("*").where("user_id", userId).orderBy("id", "asc");
+}
+
+/** Wait until change-password has verified the old password and is blocked on the user row lock. */
+async function waitForBlockedLock(): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const blocked = await db.raw<{ rows: unknown[] }>(
+      "SELECT 1 FROM pg_locks WHERE NOT granted AND locktype IN ('transactionid', 'tuple') LIMIT 1",
+    );
+    if (blocked.rows.length > 0) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("change-password never blocked on the user row lock");
 }
 
 beforeAll(() => {
@@ -146,6 +161,49 @@ describe("POST /api/auth/change-password", () => {
     expectErrorEnvelope(response.body, "InvalidCredentials");
     const after = await db("users").select("password_hash").where("id", user.id).first<Record<string, unknown> | undefined>();
     expect(after?.password_hash).toBe(before?.password_hash);
+  });
+
+  it("should refuse the change and preserve the reset hash when a reset commits after the password was verified", async () => {
+    const user = await seedUser({ email: "race.reset.change@example.test" });
+    const resetHash = await hashPassword("Synthetic-Reset-Passw0rd");
+    const token = await signAccessToken(user);
+
+    const reset = await db.transaction();
+    await reset("users").select("id").where("id", user.id).forUpdate().first();
+    const pending = changePassword(token, {
+      currentPassword: TEST_PASSWORD,
+      newPassword: NEW_PASSWORD,
+    }).then((response) => response);
+    await waitForBlockedLock();
+    await reset("users").where("id", user.id).update({ password_hash: resetHash });
+    await reset.commit();
+
+    const response = await pending;
+    const stored = await db("users").select("password_hash").where("id", user.id).first<{ password_hash: string }>();
+    expect(response.status).toBe(401);
+    expectErrorEnvelope(response.body, "InvalidCredentials");
+    expect(stored?.password_hash).toBe(resetHash);
+  });
+
+  it("should refuse the change and preserve the hash when suspension commits after the password was verified", async () => {
+    const user = await seedUser({ email: "race.suspend.change@example.test" });
+    const token = await signAccessToken(user);
+
+    const suspend = await db.transaction();
+    await suspend("users").select("id").where("id", user.id).forUpdate().first();
+    const pending = changePassword(token, {
+      currentPassword: TEST_PASSWORD,
+      newPassword: NEW_PASSWORD,
+    }).then((response) => response);
+    await waitForBlockedLock();
+    await suspend("users").where("id", user.id).update({ status: "suspended" });
+    await suspend.commit();
+
+    const response = await pending;
+    const stored = await db("users").select("password_hash").where("id", user.id).first<{ password_hash: string }>();
+    expect(response.status).toBe(403);
+    expectErrorEnvelope(response.body, "AccountSuspended");
+    expect(stored?.password_hash).toBe(user.passwordHash);
   });
 
   it("should return 400 when the new password is too short or on the denylist", async () => {

@@ -731,6 +731,12 @@ Legend for limiters: subject `ip` = `clientIp(req)`; `emailHash` = `sha256Hex(lo
 | Success | `204`, `no-store`; other families revoked (`password_changed`); cookie untouched |
 | Errors | `400`, `401 Unauthorized` / `TokenExpired` / `InvalidCredentials`, `403 AccountSuspended`, `409` (idempotency in flight), `422`, `429 RateLimited` (limiter or hash queue; contract edit C-2), `500` |
 
+`PasswordService.change` verifies the current password and hashes the replacement before opening its transaction.
+Inside the transaction it re-reads the live user with `SELECT … FOR UPDATE` before updating the hash or revoking
+sessions. A row soft-deleted since verification returns `401 Unauthorized`; a changed password hash (for example,
+from a concurrent reset) returns `401 InvalidCredentials`; a newly suspended row returns `403 AccountSuspended`.
+Each refusal rolls back once. A reset or suspension that commits first therefore cannot be overwritten by the change.
+
 #### GET `/api/auth/me` — `getMe`
 | Item | Value |
 |---|---|
@@ -1312,6 +1318,8 @@ calling `OutboxProcessor.tick` and `PurgeService.runAll` in-process against the 
 - should change the password, keep the cookie's family, and revoke all other families
 - should revoke all families when change-password is called without a cookie, or with another user's cookie
 - should return 401 InvalidCredentials when the current password is wrong
+- should return 401 InvalidCredentials and preserve the reset hash when a reset commits after change-password verifies the current password
+- should return 403 AccountSuspended and preserve the hash when suspension commits after change-password verifies the current password
 - should return 429 RateLimited with Retry-After on the 6th change-password within 15 minutes for the same user, and not limit a different user
 - should return 403 AccountSuspended on change-password, GET /me, and PATCH /me when the row is suspended but the access token is still valid
 

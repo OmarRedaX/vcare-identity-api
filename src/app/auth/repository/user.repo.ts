@@ -70,8 +70,8 @@ export async function findLiveById(id: number, conn: Knex = db): Promise<User | 
 }
 
 /**
- * Login's session insert: locks the row so a concurrent password reset or suspension either finishes first
- * (the caller then sees the new hash or status) or waits until the new session exists and revokes it.
+ * Login and password change lock the row so a concurrent reset or suspension either finishes first
+ * (the caller sees the new hash or status) or waits until the transaction completes.
  * Index: primary key.
  */
 export async function findLiveByIdForUpdate(id: number, conn: Knex): Promise<User | undefined> {

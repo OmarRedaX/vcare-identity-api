@@ -118,6 +118,30 @@ describe("OutboxProcessor.tick", () => {
     expect(sink.lines()).toContainEqual(expect.objectContaining({ message: "outbox_job_skipped", jobId: 1 }));
   });
 
+  it("should not re-queue the job when markDone fails after a successful send", async () => {
+    repo.claim.mockResolvedValue([job()]);
+    repo.markDone.mockRejectedValue(new Error("connection lost"));
+
+    await expect(build(() => Promise.resolve("sent"), sink).tick(new AbortController().signal)).resolves.not.toThrow();
+
+    expect(repo.markRetry).not.toHaveBeenCalled();
+    expect(repo.markDead).not.toHaveBeenCalled();
+    expect(sink.lines()).toContainEqual(
+      expect.objectContaining({ message: "outbox_job_bookkeeping_failed", jobId: 1 }),
+    );
+  });
+
+  it("should finish the rest of the batch when markRetry throws for one job", async () => {
+    repo.claim.mockResolvedValue([job({ id: 1 }), job({ id: 2 })]);
+    repo.markRetry.mockRejectedValue(new Error("connection lost"));
+    const handler: JobHandler = (queued) =>
+      queued.id === 1 ? Promise.reject(new OutboxDeliveryError("EmailTimeout", true)) : Promise.resolve("sent");
+
+    await expect(build(handler, sink, { concurrency: 1 }).tick(new AbortController().signal)).resolves.not.toThrow();
+
+    expect(repo.markDone).toHaveBeenCalledWith(2, db);
+  });
+
   it("should schedule a backed-off retry when the failure is retryable and attempts remain", async () => {
     repo.claim.mockResolvedValue([job({ attempts: 2 })]);
 

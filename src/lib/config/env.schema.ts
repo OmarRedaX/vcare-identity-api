@@ -165,6 +165,29 @@ export const envSchema = z
         message: "must be set explicitly (>= 1) in production",
       });
     }
+    if (value.NODE_ENV === "production") {
+      if (!value.REDIS_URL.startsWith("rediss://")) {
+        ctx.addIssue({ code: "custom", path: ["REDIS_URL"], message: "must use rediss:// (TLS) in production" });
+      }
+      const sslMode = new URL(value.DATABASE_URL).searchParams.get("sslmode");
+      if (sslMode !== "require" && sslMode !== "verify-full" && sslMode !== "verify-ca") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["DATABASE_URL"],
+          message: "must carry sslmode=require, verify-ca or verify-full in production",
+        });
+      }
+      if (value.OTP_PEPPER !== undefined && value.OTP_PEPPER.toLowerCase().includes("change-me")) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["OTP_PEPPER"],
+          message: "must not be a development placeholder in production",
+        });
+      }
+      if (value.APP_BASE_URL !== undefined && !value.APP_BASE_URL.startsWith("https://")) {
+        ctx.addIssue({ code: "custom", path: ["APP_BASE_URL"], message: "must use https in production" });
+      }
+    }
     if (value.INTERNAL_PORT === value.PORT) {
       ctx.addIssue({
         code: "custom",

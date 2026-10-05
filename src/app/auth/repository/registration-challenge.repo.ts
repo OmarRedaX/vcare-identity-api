@@ -30,6 +30,15 @@ function toEntity(row: RegistrationChallengeRow): RegistrationChallenge {
   });
 }
 
+/**
+ * Serialises concurrent `register/start` calls for one email for the rest of the transaction, so the
+ * invalidate-then-insert pair can never interleave and leave two open challenges (BR-1). The lock is released
+ * on commit or rollback; it needs no schema change.
+ */
+export async function lockEmailForStart(email: string, conn: Knex = db): Promise<void> {
+  await conn.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [email.toLowerCase()]);
+}
+
 /** register/start: a resend supersedes earlier open challenges (BR-1). */
 export async function invalidateOpenForEmail(email: string, conn: Knex = db): Promise<number> {
   return conn(TABLE)

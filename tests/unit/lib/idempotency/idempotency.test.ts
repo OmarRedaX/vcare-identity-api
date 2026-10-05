@@ -259,7 +259,7 @@ describe("idempotency middleware", () => {
     expect(redis.store.size).toBe(0);
   });
 
-  it("should delete the record when the client disconnects before finish", async () => {
+  it("should keep the in-flight record on disconnect and store the handler outcome when it ends afterwards", async () => {
     const redis = fakeRedis();
     const middleware = idempotency({ required: true }, { redis: redis.client, logger: logSink().logger });
 
@@ -293,7 +293,19 @@ describe("idempotency middleware", () => {
     res.emit("close");
     await flush();
 
-    expect(redis.del).toHaveBeenCalledTimes(1);
+    expect(redis.del).not.toHaveBeenCalled();
+    expect(record(redis.store, onlyKey(redis.store)).state).toBe("in_flight");
+
+    // The handler keeps running after the socket is gone and ends its response: the outcome is stored.
+    res.statusCode = 201;
+    res.json({ success: true });
+    res.end();
+    await flush();
+
+    const stored = record(redis.store, onlyKey(redis.store));
+    expect(stored.state).toBe("completed");
+    expect(stored.status).toBe(201);
+    expect(redis.del).not.toHaveBeenCalled();
   });
 
   it("should replay the stored status and body without running the handler when the same key and body repeat", async () => {

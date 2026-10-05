@@ -147,6 +147,30 @@ describe("RegisterCompleteRequestDto", () => {
   });
 });
 
+describe("timezone fixed offsets", () => {
+  const OFFSETS = ["+01:00", "-05:00", "GMT+1", "01:00"];
+
+  it.each(OFFSETS)("should reject %s on register/complete because it is not an IANA zone", async (timezone) => {
+    expect(issueFor(await detailsOf(RegisterCompleteRequestDto, { ...VALID_COMPLETE, timezone }), "timezone")).toBe(
+      "must be a valid IANA time zone",
+    );
+  });
+
+  it.each(OFFSETS)("should reject %s on PATCH /auth/me because it is not an IANA zone", async (timezone) => {
+    expect(issueFor(await detailsOf(UpdateMeRequestDto, { timezone }), "timezone")).toBe(
+      "must be a valid IANA time zone",
+    );
+  });
+
+  it("should accept UTC and a named zone on both DTOs", async () => {
+    const registered = await validateBody(RegisterCompleteRequestDto, { ...VALID_COMPLETE, timezone: "UTC" });
+    const patched = await validateBody(UpdateMeRequestDto, { timezone: "africa/cairo" });
+
+    expect(registered.timezone).toBe("UTC");
+    expect(patched.timezone).toBe("Africa/Cairo");
+  });
+});
+
 describe("LoginRequestDto", () => {
   it("should accept any non-empty password when logging in, denylist included", async () => {
     const [common] = [...PASSWORD_DENYLIST];

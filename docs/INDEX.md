@@ -14,12 +14,13 @@ related: [service-card, system-design, runbook, quickstart]
 is the Diátaxis type — a label over the docs, not a folder tree. Binding rules live in `CLAUDE.md`
 (cite sections by name, e.g. "CLAUDE.md → Security rules").
 
-> Status (2026-09-18): the `foundation` and `auth` modules are built — the skeleton, both listeners, health
+> Status (2026-10-04): the `foundation` and `auth` modules are built — the skeleton, both listeners, health
 > probes, the cross-cutting `src/lib/` pieces, and the whole public auth surface (registration, login, refresh
 > rotation, logout, password flows, own profile, JWKS) plus the outbox worker and retention purges. `users`
 > (Epic A unit 2) and `/internal/*` (Epic B) are not built yet. The **auth and users contract changes are
 > applied** (C-1…C-14 of [auth/spec.md](./auth/spec.md) §14.2); the architecture shards are reconciled with
-> as-built auth code by `/update-docs auth`. These docs are seeded from the PRD and `CLAUDE.md` and refined by
+> as-built auth code. Auth has unit and integration tests, a manual QA run and a code review whose findings are
+> resolved (see [auth/tasks.md](./auth/tasks.md)). These docs are seeded from the PRD and `CLAUDE.md` and refined by
 > the 2026-09-15 `/system-design` baseline — see
 > [architecture/design-baseline.md](./architecture/design-baseline.md).
 
@@ -65,6 +66,8 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [adr/0015-foundation-runtime-dependencies.md](./adr/0015-foundation-runtime-dependencies.md) | `reflect-metadata` was added and there is no `cors`, `uuid`, or `dotenv` package (in-house CORS, `crypto.randomUUID`, Node env files) | explanation |
 | [adr/0016-auth-runtime-dependencies.md](./adr/0016-auth-runtime-dependencies.md) | `jose`, `argon2` and `bcrypt` were added (bcrypt verify-only), and there is no cookie parser, Resend SDK, or HTTP client | explanation |
 | [adr/0017-password-reset-by-one-time-code.md](./adr/0017-password-reset-by-one-time-code.md) | password reset is a typed 6-digit code instead of an emailed link token, and what bounds its 20 bits of entropy | explanation |
+| [adr/0018-enumeration-timing-residual.md](./adr/0018-enumeration-timing-residual.md) | why known-versus-unknown email work in `register/start` and `forgot-password` is not equalised | explanation |
+| [adr/0019-refresh-versus-suspension-lock-order.md](./adr/0019-refresh-versus-suspension-lock-order.md) | the lock order the status-change code and refresh rotation must share, and why `rotate` is not changed yet | explanation |
 
 ## Contract (source of truth — prose above derives from it)
 | Contract | Defines | Lens |
@@ -85,9 +88,9 @@ module doc when it is created.
 | [foundation/spec.md](./foundation/spec.md) | build or change the skeleton: file list and exported APIs, env subset, error handler, logger redaction, idempotency and rate-limit behaviour, health, shutdown, Docker, CI, test plan; as-built divergences in §15 | reference |
 | [foundation/tasks.md](./foundation/tasks.md) | see what was built for the skeleton, what is still open (hub sync, Knex log follow-up), and the test counts | reference |
 | [auth/brainstorm.md](./auth/brainstorm.md) | see the agreed scope of the auth module (registration, login, refresh sessions, passwords, own profile, JWKS, token/RBAC infrastructure, outbox worker and email) and its open questions | explanation |
-| [auth/spec.md](./auth/spec.md) | build or change the auth module: migrations for users/refresh_tokens/password_resets/registration_challenges/outbox_jobs, every auth + JWKS endpoint (guard, policy, limiters, idempotency, headers), refresh rotation algorithm, password reset by 6-digit code, `lib/auth`, `lib/rbac`, password hashing, outbox worker, email adapters, purges, env, test plan; ready (v1.1.0, no open questions) — apply its contract edits C-1…C-14 before coding | reference |
+| [auth/spec.md](./auth/spec.md) | build or change the auth module: migrations for users/refresh_tokens/password_resets/registration_challenges/outbox_jobs, every auth + JWKS endpoint (guard, policy, limiters, idempotency, headers), refresh rotation algorithm, password reset by 6-digit code, `lib/auth`, `lib/rbac`, password hashing, outbox worker, email adapters, purges, env, test plan; ready (v1.1.0, no open questions); its contract edits C-1…C-14 are applied and the module is built | reference |
 | [users/brainstorm.md](./users/brainstorm.md) | see the agreed scope of admin user management (list/get users, patient status changes with history, session list/revoke) and its open questions | explanation |
-| [auth/tasks.md](./auth/tasks.md) | see Epic A's unit graph (auth then users, serial) and the auth build tasks and their status (build complete; tests, manual QA and doc reconciliation open) | reference |
+| [auth/tasks.md](./auth/tasks.md) | see Epic A's unit graph (auth then users, serial) and the auth build tasks and their status (build, tests and manual QA done; review findings resolved) | reference |
 | [users/tasks.md](./users/tasks.md) | see the users build tasks and their status (depends on auth) | reference |
 | [auth/manual-qa.md](./auth/manual-qa.md) | re-run or review the CURL checks of every `/api/auth/*` operation and the JWKS (enumeration safety, idempotency, refresh rotation/reuse/grace, rate limits, no-store, log PII scan) and see the open defects | how-to |
 | [foundation/manual-qa.md](./foundation/manual-qa.md) | re-run or review the CURL checks of health, request id, envelope, listener isolation, headers, CORS, and the readiness table with Redis/Postgres stopped | how-to |

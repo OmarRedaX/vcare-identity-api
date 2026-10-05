@@ -14,6 +14,7 @@ import type { MockedModule } from "../../../helpers/types";
 jest.mock("../../../../src/app/auth/repository/registration-challenge.repo", () => ({
   findLatestOpenForUpdate: jest.fn(),
   invalidateOpenForEmail: jest.fn(),
+  lockEmailForStart: jest.fn(),
   insertChallenge: jest.fn(),
   recordFailedAttempt: jest.fn(),
   markConsumed: jest.fn(),
@@ -151,6 +152,7 @@ describe("RegistrationService.start", () => {
 
     await service.start(EMAIL, REQUEST_ID);
 
+    expect(challenges.lockEmailForStart).toHaveBeenCalledWith(EMAIL, db.trx);
     expect(challenges.invalidateOpenForEmail).toHaveBeenCalledWith(EMAIL, db.trx);
     expect(challenges.insertChallenge).toHaveBeenCalledWith(EMAIL, db.trx);
     expect(outbox.enqueue).toHaveBeenCalledWith(db.trx, "send_registration_code", 9, REQUEST_ID);

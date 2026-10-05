@@ -48,6 +48,7 @@ export class RegistrationService {
   async start(email: string, requestId: string): Promise<void> {
     const trx = await this.db.transaction();
     try {
+      await challenges.lockEmailForStart(email, trx);
       const existing = await users.findLiveByEmail(email, trx);
       if (existing === undefined) {
         await challenges.invalidateOpenForEmail(email, trx);

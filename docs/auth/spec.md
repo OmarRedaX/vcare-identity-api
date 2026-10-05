@@ -6,7 +6,7 @@ module: auth
 status: ready
 version: 1.1.0
 diataxis: reference
-last_verified: 2026-10-02
+last_verified: 2026-10-04
 tags: [spec, auth, registration, login, refresh-token, jwks, rbac, password, outbox, email, worker]
 related: [auth-brainstorm, auth-tasks, users-brainstorm, foundation-spec, auth-tokens, data-model, infrastructure, design-baseline, overview, adr-0002-asymmetric-jwt-rotating-refresh, adr-0003-argon2id-password-hashing, adr-0004-rejected-doctors-can-sign-in, adr-0005-refresh-reuse-grace-window, adr-0006-email-first-registration-otp, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0010-manual-admin-provisioning-role-policies, adr-0011-pii-retained-on-soft-delete, adr-0015-foundation-runtime-dependencies]
 contracts: [contracts/openapi.yaml]
@@ -633,7 +633,7 @@ violation throws `Error("route_without_policy: <METHOD> <path>")` in every envir
 | Policy | Value | Routes |
 |---|---|---|
 | `publicPolicy` | `{ kind: "public", owner: "none" }` | register/start, register/complete, login, forgot-password, reset-password, JWKS |
-| `refreshFamilyPolicy` | `{ kind: "refresh-cookie", roles: ["patient","doctor","admin"], owner: "refresh-family" }` | refresh, logout |
+| `refreshFamilyPolicy` | `{ kind: "refresh-cookie", owner: "refresh-family" }` (no `roles`: the contract declares `x-roles: [public]` and `authorize` never evaluates roles for this kind) | refresh, logout |
 | `selfPolicy` | `{ kind: "user", roles: ["patient","doctor","admin"], owner: "self", allowedStatuses: ["pending","active","rejected"] }` | change-password, GET/PATCH me |
 
 `src/lib/auth/user-guard.ts` — `userGuard(deps)`: reads `Authorization`; must be exactly `Bearer <token>`
@@ -1043,7 +1043,7 @@ will reuse `SessionService.revokeAllForUser` inside the status-change transactio
 | BR-20a | Every reset failure — unknown email, wrong code, never-sent, expired, used/superseded, or exhausted row — returns the **identical** `400 ValidationFailed` with `details[0].field = "code"`, after the same work (argon2 hash of `newPassword` always runs first; a dummy HMAC compare runs when there is no candidate row), so reset cannot be used to enumerate accounts | service (single failure path, no early return) |
 | BR-21 | Change-password requires the current password (`401 InvalidCredentials` otherwise) and revokes all families except the one of the `vcare_rt` cookie sent with the request when that token belongs to the caller; no such cookie → all families | service tx |
 | BR-22 | New passwords are 10..128 characters and not on the denylist | DTO (`Length`, `IsAcceptablePassword`) |
-| BR-23 | `PATCH /me` changes only `fullName`, `phone`, `avatarUrl`, `timezone`, `locale`; any other property → `400`; empty body → `400`; `timezone` is a valid IANA zone and `locale` a BCP-47 tag, stored canonical | DTO (`forbidNonWhitelisted`, custom validators), `chk_users_phone_e164`, `chk_users_full_name_not_blank` |
+| BR-23 | `PATCH /me` changes only `fullName`, `phone`, `avatarUrl`, `timezone`, `locale`; any other property → `400`; empty body → `400`; `timezone` is a valid IANA zone name or `UTC` (fixed offsets such as `+01:00` or `GMT+1` are rejected) and `locale` a BCP-47 tag, stored canonical | DTO (`forbidNonWhitelisted`, custom validators), `chk_users_phone_e164`, `chk_users_full_name_not_blank` |
 | BR-24 | Self routes serve any non-suspended live account (`pending`, `active`, `rejected`); a suspended row → `403 AccountSuspended` even with a still-valid access token; a soft-deleted or unknown subject → `401 Unauthorized` | `authorize(selfPolicy)` (claim) + service row check |
 | BR-25 | Access tokens are EdDSA, `kid`-tagged, 900 s, with exactly the contract claims; expired → `401 TokenExpired`, any other defect (bad signature, unknown `kid`, wrong `iss`/`aud`/`typ`, malformed claims) → `401 Unauthorized` | `lib/auth/jwt.ts`, `user-guard` |
 | BR-26 | JWKS publishes the public half of every configured key and never private material | `lib/auth/jwks.ts` |
@@ -1088,7 +1088,7 @@ Note: `409 Conflict` from an in-flight idempotent request is foundation behaviou
 | Route | Guard | Roles | Ownership | Account state |
 |---|---|---|---|---|
 | `POST /api/auth/register/start`, `/register/complete`, `/login`, `/forgot-password`, `/reset-password`, `GET /.well-known/jwks.json` | none | public | none | login: `pending`/`active`/`rejected` |
-| `POST /api/auth/refresh`, `/logout` | refresh cookie | patient, doctor, admin (the cookie owner) | the presented token's family | refresh: not `suspended` |
+| `POST /api/auth/refresh`, `/logout` | refresh cookie | public (`x-roles: [public]`; the cookie owner, any role) | the presented token's family | refresh: not `suspended` |
 | `POST /api/auth/change-password`, `GET /api/auth/me`, `PATCH /api/auth/me` | user token | patient, doctor, admin | self (acts on `req.auth.userId` only) | `pending`, `active`, `rejected` |
 Discrepancy flagged: CLAUDE.md → Authorization's route table says refresh requires "not suspended/rejected"; ADR 0004
 and the contract allow `rejected`. This spec follows the contract (12.2).
@@ -1515,7 +1515,10 @@ superseding nothing but extending ADR 0006's reasoning to reset) because it chan
 and the contract. The user decides; the developer's ADR 0016 remains the runtime-dependency ADR (12.1).
 
 ### 14.2 Contract changes required (`contracts/openapi.yaml`, provider identity-service; public API only, Care unaffected)
-Apply in this order as build step 0 (CLAUDE.md → Build order for a new module). Each edit is mechanical; line
+**Status (2026-10-04): all of C-1…C-14 are applied and the module is built;** the list below is kept as the record
+of what changed. Later contract edits (review 2026-10-04: `Conflict` carries `Retry-After` for the in-flight
+idempotent request, the no-store scope, refresh `x-roles: [public]`, timezone wording) live in the contract itself.
+Originally to be applied in this order as build step 0 (CLAUDE.md → Build order for a new module). Each edit is mechanical; line
 references are to the file as of 2026-09-17.
 - **C-1 [D-1]** `login`: delete the parameter line `- $ref: '#/components/parameters/IdempotencyKeyOptional'`, remove
   `IdempotencyConflict` from `x-error-codes` (leaving
@@ -1573,7 +1576,7 @@ references are to the file as of 2026-09-17.
   `changePassword` — the foundation returns `409 Conflict` with `Retry-After: 1` while the same `Idempotency-Key` is
   in flight. **Not** `login` (C-1 removes its idempotency).
 - **C-12** Timezone/locale: in `RegisterCompleteRequest` and `UpdateMeRequest` set
-  `timezone: { type: string, minLength: 1, maxLength: 64, description: 'IANA time zone; stored in canonical form' }`
+  `timezone: { type: string, minLength: 1, maxLength: 64, description: 'IANA zone name (e.g. Africa/Cairo) or UTC, stored in canonical form; fixed UTC offsets such as +01:00 or GMT+1 are rejected' }`
   and `locale: { type: string, minLength: 2, maxLength: 35, description: 'BCP-47 tag; stored in canonical form' }`;
   `fullName` in both: add `pattern: '\S'` (not blank).
 - **C-13** `IdempotencyKeyRequired.description`: append "Missing → 400 ValidationFailed with details[].field = \"Idempotency-Key\"."

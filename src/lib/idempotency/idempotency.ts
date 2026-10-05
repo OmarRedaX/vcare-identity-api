@@ -90,10 +90,13 @@ function withCurrentRequestId(body: unknown, requestId: string): unknown {
   return body;
 }
 
-function captureResponse(
-  res: Response,
-  onComplete: (status: number, body: unknown, clientClosed: boolean) => void,
-): void {
+/**
+ * Fires `onComplete` once, when the **handler** finishes its response (`res.end`, which `json` and `send` reach),
+ * not when the socket closes: a client that disconnects early does not stop Express, so the handler still commits
+ * its work and its outcome must still be stored for the retry to replay (CLAUDE.md -> API conventions). A socket
+ * that closes before the handler ends leaves the in-flight record to the handler's outcome (or its TTL).
+ */
+function captureResponse(res: Response, onComplete: (status: number, body: unknown) => void): void {
   let captured: unknown = null;
 
   const originalJson = res.json.bind(res);
@@ -111,20 +114,21 @@ function captureResponse(
   }) as typeof res.send;
 
   let done = false;
-  const complete = (clientClosed: boolean): void => {
+  const complete = (): void => {
     if (done) {
       return;
     }
     done = true;
-    onComplete(res.statusCode, captured, clientClosed);
+    onComplete(res.statusCode, captured);
   };
 
-  res.on("finish", () => {
-    complete(false);
-  });
-  res.on("close", () => {
-    complete(!res.writableEnded);
-  });
+  const originalEnd = res.end.bind(res) as (...args: unknown[]) => Response;
+  res.end = ((...args: unknown[]) => {
+    complete();
+    return originalEnd(...args);
+  }) as typeof res.end;
+
+  res.on("finish", complete);
 }
 
 /**
@@ -194,9 +198,9 @@ export function idempotency(options: IdempotencyOptions, deps?: IdempotencyDeps)
       };
 
       const beginHandler = (): void => {
-        captureResponse(res, (status, body, clientClosed) => {
+        captureResponse(res, (status, body) => {
           // 429 is a transient refusal (e.g. HashQueueFull), not the request's outcome: never replay it.
-          if (clientClosed || status >= 500 || status === 429) {
+          if (status >= 500 || status === 429) {
             client.del(key).catch(() => undefined);
             return;
           }

@@ -80,26 +80,44 @@ export class OutboxProcessor {
   private runOne(job: OutboxJob, signal: AbortSignal): Promise<void> {
     // The job's own request id, so every worker log line joins the originating request's trace.
     return requestContext.run({ requestId: job.requestId }, async () => {
-      const handler = this.handlers.get(job.type);
-      if (handler === undefined) {
-        await markDead(job.id, "UnknownJobType", this.db);
-        this.logger.error("outbox_job_dead", { jobId: job.id, type: job.type, errorClass: "UnknownJobType" });
-        this.logger.metric("outbox_dead_jobs", 1, "Count", { type: job.type });
-        return;
-      }
-
       try {
-        const result = await handler(job, signal);
-        await markDone(job.id, this.db);
-        if (result === "skipped") {
-          this.logger.info("outbox_job_skipped", { jobId: job.id, type: job.type });
-          return;
-        }
-        this.logger.info("outbox_job_sent", { jobId: job.id, type: job.type, attempts: job.attempts });
+        await this.process(job, signal);
       } catch (err) {
-        await this.finishFailure(job, err);
+        // A bookkeeping failure (e.g. the database is briefly down) must never reject the whole batch:
+        // the lease expires and is reclaimed later (ADR 0007, at-least-once).
+        this.logger.error("outbox_job_bookkeeping_failed", {
+          jobId: job.id,
+          type: job.type,
+          errorClass: err instanceof Error ? err.name : "UnknownError",
+        });
       }
     });
+  }
+
+  private async process(job: OutboxJob, signal: AbortSignal): Promise<void> {
+    const handler = this.handlers.get(job.type);
+    if (handler === undefined) {
+      await markDead(job.id, "UnknownJobType", this.db);
+      this.logger.error("outbox_job_dead", { jobId: job.id, type: job.type, errorClass: "UnknownJobType" });
+      this.logger.metric("outbox_dead_jobs", 1, "Count", { type: job.type });
+      return;
+    }
+
+    let result: Awaited<ReturnType<JobHandler>>;
+    try {
+      result = await handler(job, signal);
+    } catch (err) {
+      await this.finishFailure(job, err);
+      return;
+    }
+
+    // Outside the handler try: a failed markDone after a successful send must not re-queue the job.
+    await markDone(job.id, this.db);
+    if (result === "skipped") {
+      this.logger.info("outbox_job_skipped", { jobId: job.id, type: job.type });
+      return;
+    }
+    this.logger.info("outbox_job_sent", { jobId: job.id, type: job.type, attempts: job.attempts });
   }
 
   private async finishFailure(job: OutboxJob, err: unknown): Promise<void> {

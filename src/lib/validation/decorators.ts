@@ -43,10 +43,18 @@ export function WhenProvidedAndNotNull(options?: ValidationOptions): PropertyDec
   return ValidateIf(isProvidedAndNotNull, options);
 }
 
+/** IANA names only: a leading letter, then `/`-separated segments. Fixed offsets (`+01:00`, `GMT+1`) never match. */
+const IANA_ZONE_NAME = /^[A-Za-z][A-Za-z0-9_]*(\/[A-Za-z0-9_+-]+)*$/;
+
 /** `Intl` accepts the zone and echoes a canonical name (`africa/cairo` → `Africa/Cairo`). */
 export function resolveTimeZone(value: string): string | undefined {
+  // Node also accepts fixed UTC offsets (`+01:00`), which have no DST and are not IANA zones (BR-23).
+  if (!IANA_ZONE_NAME.test(value)) {
+    return undefined;
+  }
   try {
-    return new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions().timeZone;
+    const resolved = new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions().timeZone;
+    return IANA_ZONE_NAME.test(resolved) ? resolved : undefined;
   } catch {
     return undefined;
   }

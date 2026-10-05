@@ -1,15 +1,20 @@
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
+import type Redis from "ioredis";
 import type { DependencyContainer } from "tsyringe";
 import { userGuard } from "../../lib/auth/user-guard";
 import type { SigningKeySet } from "../../lib/auth/types";
 import { container as rootContainer } from "../../lib/di/container";
 import { TOKENS } from "../../lib/di/tokens";
+import type { Env } from "../../lib/config/types";
 import { clientIp } from "../../lib/http/client-ip";
 import { noStore } from "../../lib/http/no-store";
 import { sealRouter } from "../../lib/http/route-capture";
 import { idempotency } from "../../lib/idempotency/idempotency";
+import type { IdempotencyOptions } from "../../lib/idempotency/types";
+import type { Logger } from "../../lib/logger/logger";
 import { authorize } from "../../lib/rbac/authorize";
 import { rateLimit } from "../../lib/rate-limit/rate-limit";
+import type { RateLimitDeps, RateLimitOptions } from "../../lib/rate-limit/types";
 import type { Clock } from "../../lib/time/types";
 import { sha256Hex } from "../../pkg/utils/crypto";
 import { toMs } from "../../pkg/utils/time";
@@ -43,6 +48,19 @@ export function buildAuthRouter(scope: DependencyContainer = rootContainer): Rou
   const clock = scope.resolve<Clock>(TOKENS.Clock);
   const guard = userGuard({ keys, clock });
 
+  // The same Redis and Logger the services use (bootstrap overrides included), not the process globals.
+  const redis = scope.resolve<Redis>(TOKENS.Redis);
+  const logger = scope.resolve<Logger>(TOKENS.Logger);
+  const env = scope.resolve<Env>(TOKENS.Env);
+  const rateDeps: RateLimitDeps = {
+    redis,
+    logger,
+    fallbackDivisor: env.RATE_LIMIT_FALLBACK_DIVISOR,
+    now: () => Date.now(),
+  };
+  const limiter = (options: RateLimitOptions): RequestHandler => rateLimit(options, rateDeps);
+  const idem = (options: IdempotencyOptions): RequestHandler => idempotency(options, { redis, logger });
+
   const router = Router();
 
   // Every /api/auth response — success, error, 429, and an unmatched /api/auth path — is non-cacheable.
@@ -50,14 +68,14 @@ export function buildAuthRouter(scope: DependencyContainer = rootContainer): Rou
 
   router.post(
     "/register/start",
-    rateLimit({
+    limiter({
       name: "register-start-email",
       limit: 3,
       windowMs: toMs(1, "h"),
       subject: (req) => emailHashSubject(req.body),
       degrade: "fallback",
     }),
-    rateLimit({
+    limiter({
       name: "register-start-ip",
       limit: 5,
       windowMs: toMs(1, "h"),
@@ -65,13 +83,13 @@ export function buildAuthRouter(scope: DependencyContainer = rootContainer): Rou
       degrade: "fallback",
     }),
     authorize(publicPolicy),
-    idempotency({ required: false }),
+    idem({ required: false }),
     controller.startRegistration,
   );
 
   router.post(
     "/register/complete",
-    rateLimit({
+    limiter({
       name: "register-complete-ip",
       limit: 10,
       windowMs: toMs(1, "h"),
@@ -79,20 +97,20 @@ export function buildAuthRouter(scope: DependencyContainer = rootContainer): Rou
       degrade: "fallback",
     }),
     authorize(publicPolicy),
-    idempotency({ required: true }),
+    idem({ required: true }),
     controller.completeRegistration,
   );
 
   router.post(
     "/login",
-    rateLimit({
+    limiter({
       name: "login-ip-email",
       limit: 5,
       windowMs: toMs(1, "m"),
       subject: (req) => `${clientIp(req)}:${emailHashSubject(req.body)}`,
       degrade: "fallback",
     }),
-    rateLimit({
+    limiter({
       name: "login-ip",
       limit: 20,
       windowMs: toMs(1, "m"),
@@ -110,7 +128,7 @@ export function buildAuthRouter(scope: DependencyContainer = rootContainer): Rou
 
   router.post(
     "/forgot-password",
-    rateLimit({
+    limiter({
       name: "forgot-email",
       limit: 3,
       windowMs: toMs(1, "h"),
@@ -118,7 +136,7 @@ export function buildAuthRouter(scope: DependencyContainer = rootContainer): Rou
       degrade: "fallback",
     }),
     authorize(publicPolicy),
-    idempotency({ required: false }),
+    idem({ required: false }),
     controller.forgotPassword,
   );
 
@@ -126,14 +144,14 @@ export function buildAuthRouter(scope: DependencyContainer = rootContainer): Rou
     "/reset-password",
     // Per-email first: it bounds a distributed guessing attack on one account to the 5 tries the row
     // itself allows (ADR 0017).
-    rateLimit({
+    limiter({
       name: "reset-email",
       limit: 5,
       windowMs: toMs(1, "h"),
       subject: (req) => emailHashSubject(req.body),
       degrade: "fallback",
     }),
-    rateLimit({
+    limiter({
       name: "reset-ip",
       limit: 10,
       windowMs: toMs(1, "h"),
@@ -141,7 +159,7 @@ export function buildAuthRouter(scope: DependencyContainer = rootContainer): Rou
       degrade: "fallback",
     }),
     authorize(publicPolicy),
-    idempotency({ required: false }),
+    idem({ required: false }),
     controller.resetPassword,
   );
 
@@ -150,14 +168,14 @@ export function buildAuthRouter(scope: DependencyContainer = rootContainer): Rou
     guard,
     authorize(selfPolicy),
     // Subject is the authenticated user id, so the limiter must run after the guard (D-2).
-    rateLimit({
+    limiter({
       name: "change-password-user",
       limit: 5,
       windowMs: toMs(15, "m"),
       subject: (req) => (req.auth?.kind === "user" ? String(req.auth.userId) : "anonymous"),
       degrade: "fallback",
     }),
-    idempotency({ required: false }),
+    idem({ required: false }),
     controller.changePassword,
   );
 

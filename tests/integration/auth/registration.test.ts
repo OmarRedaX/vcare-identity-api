@@ -121,6 +121,20 @@ describe("POST /api/auth/register/start", () => {
     expect(jobs[0]?.request_id).toBe(response.headers["x-request-id"]);
   });
 
+  it("should leave exactly one open challenge when two register/start calls for the same email run concurrently", async () => {
+    const address = "racing.patient@example.test";
+
+    const responses = await Promise.all([
+      request(apps.publicApp).post("/api/auth/register/start").send({ email: address }),
+      request(apps.publicApp).post("/api/auth/register/start").send({ email: address }),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([202, 202]);
+    const rows = await challengesFor(address);
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((row) => row.invalidated_at === null && row.consumed_at === null)).toHaveLength(1);
+  });
+
   it("should answer identically and enqueue only a notice when the email belongs to a live account", async () => {
     const address = "known.patient@example.test";
     await seedUser({ email: address });
@@ -251,6 +265,19 @@ describe("POST /api/auth/register/start", () => {
 });
 
 describe("POST /api/auth/register/complete", () => {
+  it("should return 400 ValidationFailed on the timezone field when it is a fixed UTC offset", async () => {
+    for (const timezone of ["+01:00", "-05:00", "GMT+1"]) {
+      const response = await request(apps.publicApp)
+        .post("/api/auth/register/complete")
+        .set("Idempotency-Key", uuid())
+        .send(completeBody({ timezone }));
+
+      expect(response.status).toBe(400);
+      expectErrorEnvelope(response.body, "ValidationFailed");
+      expect((response.body as { error: { details: { field: string }[] } }).error.details[0]?.field).toBe("timezone");
+    }
+  });
+
   it("should create an active patient with a verified email when the code is correct", async () => {
     const address = "amira.patient@example.test";
     const code = await startAndReadCode(address);

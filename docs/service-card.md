@@ -2,8 +2,8 @@
 title: Identity Service — Service Card
 owner: identity-team
 service: identity-service
-status: draft
-last_verified: 2026-09-18
+status: ready
+last_verified: 2026-10-04
 tags: [service-card, catalog, identity]
 related: [index, system-design, runbook, data-model, api, design-baseline, deployment]
 sync_to_hub: catalog/identity-service.card.md
@@ -19,7 +19,7 @@ sync_to_hub: catalog/identity-service.card.md
 | **Name** | identity-service |
 | **Repo** | `vcare-identity-api` |
 | **Owner** | identity-team |
-| **Status** | `foundation` + `auth` built (2026-09-18): both listeners, health probes, and the whole public auth surface — registration, login, refresh rotation with reuse detection, logout, password reset by 6-digit code, change password, own profile, JWKS — plus the outbox email worker and retention purges. `users` (admin) and `/internal/*` are contract-only. All accepted contract changes are applied |
+| **Status** | `foundation` + `auth` built, tested and reviewed (2026-10-04): both listeners, health probes, and the whole public auth surface — registration, login, refresh rotation with reuse detection, logout, password reset by 6-digit code, change password, own profile, JWKS — plus the outbox email worker and retention purges. `users` (admin) and `/internal/*` are contract-only. All accepted contract changes are applied |
 | **Tier** | 1 — if it is down, nobody can log in or refresh. Target 99.95 % monthly (ADR 0009) |
 | **Runtime** | Node.js 24 LTS + TypeScript, Express 5; one image, deployed as `identity-api` (public `PORT` 3000 + internal `INTERNAL_PORT` 3100) and `identity-worker` (outbox + purges) on managed containers (hub ADR 0007) |
 | **Datastores** | PostgreSQL (own identity database, Multi-AZ); Redis (rate limits, idempotency — **Tier 2**, degrades without outage, ADR 0008) |

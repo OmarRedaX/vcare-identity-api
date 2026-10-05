@@ -177,6 +177,8 @@ describe("POST /api/auth/login", () => {
     const response = await login(user.email);
     const accessToken = (expectSuccessEnvelope(response.body) as { accessToken: string }).accessToken;
     const jwks = await request(apps.publicApp).get("/.well-known/jwks.json");
+    expect(jwks.headers["cache-control"]).toBe("public, max-age=300");
+    expect(jwks.headers["x-request-id"]).toMatch(/^[0-9a-f-]{36}$/);
     const keySet = createLocalJWKSet(jwks.body as Parameters<typeof createLocalJWKSet>[0]);
 
     const verified = await jwtVerify(accessToken, keySet, {

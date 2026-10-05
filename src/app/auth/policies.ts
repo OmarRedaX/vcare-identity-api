@@ -16,7 +16,6 @@ export const publicPolicy: Policy = { kind: "public", owner: "none" };
  */
 export const refreshFamilyPolicy: Policy = {
   kind: "refresh-cookie",
-  roles: [UserRole.Patient, UserRole.Doctor, UserRole.Admin],
   owner: "refresh-family",
 };
 

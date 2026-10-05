@@ -3,6 +3,7 @@ import helmet from "helmet";
 import { env } from "./lib/config/env";
 import { errorHandler, notFoundHandler } from "./lib/error/errorHandler";
 import { cors } from "./lib/http/cors";
+import { noStore } from "./lib/http/no-store";
 import { rejectOptions } from "./lib/http/reject-options";
 import { inflightTracker } from "./lib/lifecycle/inflight";
 import { logger } from "./lib/logger/logger";
@@ -26,6 +27,10 @@ export function createApp(options?: AppOptions): Express {
   app.use(requestId());
   app.use(requestLogger());
   app.use(helmet({ hsts: env.NODE_ENV === "production" }));
+
+  // Every /api/auth response is non-cacheable, including malformed-JSON 400s and OPTIONS answers (404 envelope
+  // or the development CORS preflight 204), so this precedes cors, rejectOptions and express.json.
+  app.use("/api/auth", noStore());
 
   if (env.CORS_ORIGINS.length > 0) {
     if (env.NODE_ENV === "production") {

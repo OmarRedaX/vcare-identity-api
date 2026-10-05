@@ -43,6 +43,13 @@ describe("IsIanaTimeZone and canonicalTimeZone", () => {
     expect(resolveTimeZone("africa/cairo")).toBe("Africa/Cairo");
   });
 
+  it("should reject fixed UTC offsets even though Intl accepts them", () => {
+    for (const offset of ["+01:00", "-05:00", "GMT+1", "+0100"]) {
+      expect(resolveTimeZone(offset)).toBeUndefined();
+    }
+    expect(resolveTimeZone("Etc/GMT+1")).toBe("Etc/GMT+1");
+  });
+
   it("should canonicalise the stored value when the zone is written in another case", () => {
     expect(canonicalTimeZone("africa/cairo")).toBe("Africa/Cairo");
     expect(canonicalTimeZone("america/new_york")).toBe("America/New_York");

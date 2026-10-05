@@ -32,3 +32,4 @@ needs a new or changed endpoint in care-service.
 
 ## Tasks
 _Written by `flow-developer` from `spec.md`._
+- [ ] (service) status change locks the `users` row `FOR UPDATE` first, then updates status, writes history and revokes all families; change `SessionService.rotate` in the same unit to the same lock order (user `FOR SHARE`, then token `FOR UPDATE`) and add a suspend-versus-refresh concurrency test (ADR 0019, review 2026-10-04)

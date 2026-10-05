@@ -224,7 +224,7 @@ paths:
         clears the cookie. Rate limit: 30/min per family. Budget p95 < 50 ms.
       security:
         - refreshCookie: []
-      x-roles: [patient, doctor, admin]
+      x-roles: [public]
       x-ownership: refresh-family
       x-error-codes: [RefreshTokenInvalid, RefreshTokenReused, AccountSuspended, RateLimited, InternalError]
       parameters:
@@ -423,7 +423,7 @@ paths:
       description: |
         Only `fullName`, `phone`, `avatarUrl`, `timezone`, `locale` may change. Any other property —
         including `email`, `role`, `status` — is rejected with `400 ValidationFailed` (unknown properties are
-        forbidden). `timezone` must be a valid IANA zone; `locale` a BCP-47 tag. Any non-suspended account,
+        forbidden). `timezone` must be a valid IANA zone name or `UTC` (fixed offsets such as `+01:00` are rejected); `locale` a BCP-47 tag. Any non-suspended account,
         including `pending` and `rejected` (ADR 0004).
       x-roles: [patient, doctor, admin]
       x-ownership: self
@@ -1035,7 +1035,10 @@ components:
       description: The request id adopted or generated for this request.
       schema: { type: string, format: uuid }
     CacheControlNoStore:
-      description: The response must not be stored by any cache (every /api/auth/* response, every token response, and the health probes).
+      description: |
+        The response must not be stored by any cache: every /api/auth/* response (including malformed-JSON 400s
+        and the 404 envelope answered to OPTIONS; in local development a CORS preflight 204), every token
+        response, and the health probes.
       schema: { type: string, const: no-store }
     SetRefreshCookie:
       description: Sets the rotated refresh token.
@@ -1050,7 +1053,7 @@ components:
         examples:
           - 'vcare_rt=; HttpOnly; Secure; SameSite=Strict; Path=/api/auth; Max-Age=0'
     RetryAfter:
-      description: Seconds until the limiter window allows another request.
+      description: Seconds to wait before retrying (429 limiter window; 409 in-flight idempotent request).
       schema: { type: integer, minimum: 1 }
 
   responses:
@@ -1227,9 +1230,13 @@ components:
                 success: false
                 error: { code: NotFound, message: Resource not found, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     Conflict:
-      description: Conflicts with existing state (e.g. a concurrent registration for the same email won the race).
+      description: |
+        Conflicts with existing state: a concurrent registration for the same email won the race
+        (`register/complete`), or a request with the same `Idempotency-Key` is still in flight (any POST that
+        accepts the key). The in-flight case carries `Retry-After: 1` and may be retried after that delay.
       headers:
         X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorEnvelope' }
@@ -1504,7 +1511,7 @@ components:
         fullName: { type: string, minLength: 1, maxLength: 120, pattern: '\S' }
         role: { type: string, enum: [patient, doctor], description: admin is never accepted. }
         phone: { type: string, pattern: '^\+[1-9][0-9]{7,14}$' }
-        timezone: { type: string, minLength: 1, maxLength: 64, description: 'IANA time zone; stored in canonical form', examples: [Africa/Cairo] }
+        timezone: { type: string, minLength: 1, maxLength: 64, description: 'IANA zone name (e.g. Africa/Cairo) or UTC, stored in canonical form; fixed UTC offsets such as +01:00 or GMT+1 are rejected', examples: [Africa/Cairo] }
         locale: { type: string, minLength: 2, maxLength: 35, description: 'BCP-47 tag; stored in canonical form', examples: [ar-EG] }
     LoginRequest:
       type: object
@@ -1542,7 +1549,7 @@ components:
         fullName: { type: string, minLength: 1, maxLength: 120, pattern: '\S' }
         phone: { type: [string, 'null'], pattern: '^\+[1-9][0-9]{7,14}$' }
         avatarUrl: { type: [string, 'null'], format: uri, maxLength: 2048 }
-        timezone: { type: string, minLength: 1, maxLength: 64, description: 'IANA time zone; stored in canonical form' }
+        timezone: { type: string, minLength: 1, maxLength: 64, description: 'IANA zone name (e.g. Africa/Cairo) or UTC, stored in canonical form; fixed UTC offsets such as +01:00 or GMT+1 are rejected' }
         locale: { type: string, minLength: 2, maxLength: 35, description: 'BCP-47 tag; stored in canonical form' }
     AdminStatusChangeRequest:
       type: object

@@ -16,9 +16,10 @@ export type Policy =
   | { kind: "public"; owner: "none" }
   /**
    * The principal is the presented refresh cookie's token row, resolved in `SessionService`, which only ever
-   * acts on that token's own family and checks the owner's role against `roles`.
+   * acts on that token's own family. No `roles`: the contract declares `x-roles: [public]` for refresh and
+   * logout and `authorize` never evaluates roles for this kind.
    */
-  | { kind: "refresh-cookie"; roles: readonly Role[]; owner: "refresh-family" }
+  | { kind: "refresh-cookie"; owner: "refresh-family" }
   /** A verified user access token; `self` routes take no id and act only on `req.auth.userId`. */
   | {
       kind: "user";

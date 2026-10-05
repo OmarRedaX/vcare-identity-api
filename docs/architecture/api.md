@@ -2,9 +2,9 @@
 title: Identity Service — API (human view of the contract)
 owner: identity-team
 service: identity-service
-status: draft
+status: ready
 diataxis: reference
-last_verified: 2026-09-16
+last_verified: 2026-10-04
 tags: [architecture, api, endpoints, rbac, error-codes]
 related: [system-design, auth-tokens, service-auth, infrastructure, design-baseline, foundation-spec]
 ---
@@ -14,13 +14,13 @@ related: [system-design, auth-tokens, service-auth, infrastructure, design-basel
 This page **derives from [`contracts/openapi.yaml`](../../contracts/openapi.yaml)** — the source of truth.
 If this page and the contract disagree, the contract wins and this page is stale; fix it with `/update-docs`.
 
-> **Contract status (2026-09-16):** every approved change in [design-baseline.md](./design-baseline.md) →
-> Required contract changes is now in the contract: email-first registration (ADR 0006), `rejected` accounts can
+> **Contract status (2026-10-04):** every approved change in [design-baseline.md](./design-baseline.md) ->
+> Required contract changes is in the contract: email-first registration (ADR 0006), `rejected` accounts can
 > log in and refresh (ADR 0004), the refresh grace window (ADR 0005), doctor targets refused on the admin status
 > route (ADR 0012), and the health split (ADR 0014).
 >
-> **Built:** only the health operations (`foundation` module, verified 2026-09-16). Every other operation below
-> is contract-only until its module is built.
+> **Built:** the `foundation` module (health) and the `auth` module (every `/api/auth/*` operation and
+> `/.well-known/jwks.json`). `users`, `service-auth` and `internal-users` below are contract-only until built.
 Per-field request/response schemas are in the contract; this page shows roles, ownership, and errors.
 
 ## Conventions
@@ -33,10 +33,10 @@ Per-field request/response schemas are in the contract; this page shows roles, o
 | Request id | `X-Request-Id` (UUID, adopted lower-cased) accepted or generated; returned on every response |
 | Unknown path | `404 NotFound` envelope on either listener; `/internal/*` is not served on the public listener and `/api/*` not on the internal one |
 | Pagination | `?cursor=&limit=` (1..100, default 20); `meta: { nextCursor, hasMore, count }` |
-| Idempotency | `Idempotency-Key` (UUID) **required** on `POST /api/auth/register/complete`, optional on other POSTs; 24 h; same key + different body → `422 IdempotencyConflict` |
+| Idempotency | `Idempotency-Key` (UUID) **required** on `POST /api/auth/register/complete`, optional on the other auth POSTs except login (which ignores it); 24 h; same key + same body replays the original response; same key + different body → `422 IdempotencyConflict`; same key while the first request is still in flight → `409 Conflict` with `Retry-After: 1` |
 | IDs | integers (int64) |
 | Auth transport | user access token `Authorization: Bearer`; refresh token only in cookie `vcare_rt` (`Path=/api/auth`); service token `Authorization: Bearer` on `/internal/*` |
-| Caching | `Cache-Control: no-store` on every `/api/auth/*` response and the service token response |
+| Caching | `Cache-Control: no-store` on every `/api/auth/*` response (including malformed-JSON 400s and `OPTIONS` answers: a `404` envelope, or the development CORS preflight `204`) and the service token response; JWKS is `public, max-age=300` |
 
 Every error response also carries `X-Request-Id`. Every route may return `500 InternalError`; it is
 omitted from the tables below.
@@ -44,14 +44,14 @@ omitted from the tables below.
 ## Tag: auth
 | Method + path | Roles (`x-roles`) | Ownership | Success | Error codes | Rate limit |
 |---|---|---|---|---|---|
-| `POST /api/auth/register/start` | public | none | `202` (always, no body) | `ValidationFailed` 400 · `IdempotencyConflict` 422 · `RateLimited` 429 | 3/h per email, 5/h per IP |
-| `POST /api/auth/register/complete` | public | none | `201` `User` | `ValidationFailed` 400 (incl. wrong/expired/consumed/exhausted code, `field: code`) · `Conflict` 409 (concurrent registration race only) · `IdempotencyConflict` 422 · `RateLimited` 429 | 10/h per IP |
-| `POST /api/auth/login` | public | none | `200` `LoginResponse` + `Set-Cookie: vcare_rt` | `ValidationFailed` 400 · `InvalidCredentials` 401 · `AccountSuspended` 403 · `IdempotencyConflict` 422 · `RateLimited` 429 | 5/min per IP+email, 20/min per IP |
-| `POST /api/auth/refresh` | patient, doctor, admin (refresh cookie) | refresh-family | `200` `AccessTokenResponse` + rotated `Set-Cookie` | `RefreshTokenInvalid` / `RefreshTokenReused` 401 · `AccountSuspended` 403 · `RateLimited` 429 | 30/min per family |
-| `POST /api/auth/logout` | patient, doctor, admin (refresh cookie, optional) | refresh-family | `204` + clearing `Set-Cookie` | — (always 204) | — |
-| `POST /api/auth/forgot-password` | public | none | `204` (always) | `ValidationFailed` 400 · `IdempotencyConflict` 422 · `RateLimited` 429 | 3/h per email |
-| `POST /api/auth/reset-password` | public | none | `204` | `ValidationFailed` 400 (incl. invalid/expired/used token, `field: token`) · `IdempotencyConflict` 422 · `RateLimited` 429 | 10/h per IP |
-| `POST /api/auth/change-password` | patient, doctor, admin | self | `204` | `ValidationFailed` 400 · `Unauthorized` / `TokenExpired` / `InvalidCredentials` (wrong current password) 401 · `AccountSuspended` 403 · `IdempotencyConflict` 422 | — |
+| `POST /api/auth/register/start` | public | none | `202` (always, no body) | `ValidationFailed` 400 · `Conflict` 409 (same `Idempotency-Key` still in flight) · `IdempotencyConflict` 422 · `RateLimited` 429 | 3/h per email, 5/h per IP |
+| `POST /api/auth/register/complete` | public | none | `201` `User` | `ValidationFailed` 400 (incl. wrong/expired/consumed/exhausted code, `field: code`) · `Conflict` 409 (concurrent registration race, or the same `Idempotency-Key` still in flight, `Retry-After: 1`) · `IdempotencyConflict` 422 · `RateLimited` 429 | 10/h per IP; `Idempotency-Key` **required** |
+| `POST /api/auth/login` | public | none | `200` `LoginResponse` + `Set-Cookie: vcare_rt` | `ValidationFailed` 400 · `InvalidCredentials` 401 · `AccountSuspended` 403 · `RateLimited` 429 | 5/min per IP+email, 20/min per IP (`Idempotency-Key` is ignored) |
+| `POST /api/auth/refresh` | public (refresh cookie) | refresh-family | `200` `AccessTokenResponse` + rotated `Set-Cookie` | `RefreshTokenInvalid` / `RefreshTokenReused` 401 · `AccountSuspended` 403 · `RateLimited` 429 | 30/min per family |
+| `POST /api/auth/logout` | public (refresh cookie, optional) | refresh-family | `204` + clearing `Set-Cookie` | — (always 204) | — |
+| `POST /api/auth/forgot-password` | public | none | `204` (always) | `ValidationFailed` 400 · `Conflict` 409 (in-flight key) · `IdempotencyConflict` 422 · `RateLimited` 429 | 3/h per email |
+| `POST /api/auth/reset-password` | public | none | `204` | `ValidationFailed` 400 (body `{ email, code, newPassword }`; unknown email or invalid/expired/used/exhausted code, `field: code`) · `Conflict` 409 (in-flight key) · `IdempotencyConflict` 422 · `RateLimited` 429 | 5/h per email, 10/h per IP |
+| `POST /api/auth/change-password` | patient, doctor, admin | self | `204` | `ValidationFailed` 400 · `Unauthorized` / `TokenExpired` / `InvalidCredentials` (wrong current password) 401 · `AccountSuspended` 403 · `Conflict` 409 (in-flight key) · `IdempotencyConflict` 422 · `RateLimited` 429 | 5 per 15 min per user |
 | `GET /api/auth/me` | patient, doctor, admin | self | `200` `User` | `Unauthorized` / `TokenExpired` 401 · `AccountSuspended` 403 | — |
 | `PATCH /api/auth/me` | patient, doctor, admin | self | `200` `User` | `ValidationFailed` 400 (incl. any of `email`, `role`, `status`) · `Unauthorized` / `TokenExpired` 401 · `AccountSuspended` 403 | — |
 
@@ -69,7 +69,8 @@ Notes
 - Self routes (`me`, `change-password`) accept any non-suspended account, including `pending` and `rejected`.
 - Change-password revokes every other family (keeps the family of the cookie sent with the request).
   Reset-password revokes all families.
-- `PATCH /api/auth/me` accepts only `fullName`, `phone`, `avatarUrl`, `timezone`, `locale`.
+- `PATCH /api/auth/me` accepts only `fullName`, `phone`, `avatarUrl`, `timezone`, `locale`. `timezone` must be an IANA
+  zone name or `UTC`; fixed offsets such as `+01:00` or `GMT+1` are rejected (`400`, `field: timezone`).
 
 ## Tag: users (admin)
 | Method + path | Roles | Ownership | Success | Error codes |
@@ -150,7 +151,7 @@ Notes
 | `ServiceTokenRequired` | 401 | `/internal/users`, `/internal/users/{id}/status` |
 | `InsufficientScope` | 403 | internal routes; `/internal/auth/token` |
 | `NotFound` | 404 | `/api/users/{id}*`, `/internal/users/{id}/status` |
-| `Conflict` | 409 | `register/complete` (a concurrent registration for the same email won the race) |
+| `Conflict` | 409 | `register/complete` (a concurrent registration for the same email won the race); any auth POST that accepts `Idempotency-Key` while the first request with that key is in flight (`Retry-After: 1`) |
 | `InvalidStatusTransition` | 409 | both status routes |
 | `IdempotencyConflict` | 422 | POST routes with `Idempotency-Key` |
 | `RateLimited` | 429 | rate-limited routes (with `Retry-After`) |

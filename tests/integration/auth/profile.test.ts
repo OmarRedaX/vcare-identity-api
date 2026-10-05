@@ -248,6 +248,20 @@ describe("PATCH /api/auth/me", () => {
     }
   });
 
+  it("should return 400 ValidationFailed on the timezone field when it is a fixed UTC offset", async () => {
+    const user = await seedUser({ email: "offset.me@example.test" });
+    const token = await signAccessToken(user);
+
+    for (const timezone of ["+01:00", "-05:00", "GMT+1"]) {
+      const response = await patchMe(token, { timezone });
+      expect(response.status).toBe(400);
+      expectErrorEnvelope(response.body, "ValidationFailed");
+      expect((response.body as { error: { details: { field: string }[] } }).error.details[0]?.field).toBe("timezone");
+    }
+    const row = await db("users").select("timezone").where("id", user.id).first<Record<string, unknown> | undefined>();
+    expect(row?.timezone).toBe("Africa/Cairo");
+  });
+
   it("should return 403 AccountSuspended and change nothing when the row is suspended", async () => {
     const user = await seedUser({ email: "suspended.patch@example.test" });
     const token = await signAccessToken(user);

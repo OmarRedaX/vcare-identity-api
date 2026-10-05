@@ -16,7 +16,7 @@ import {
 import { expectErrorEnvelope } from "../../helpers/contract";
 import { closeDb, truncateAll } from "../../helpers/db";
 import { captureLogs } from "../../helpers/log-capture";
-import { closeRedis, flushTestKeys } from "../../helpers/redis";
+import { closeRedis, createUnreachableRedis, flushTestKeys } from "../../helpers/redis";
 import { signAccessToken } from "../../helpers/tokens";
 
 const NEW_PASSWORD = "Synthetic-New-Passw0rd";
@@ -264,5 +264,56 @@ describe("privacy across a full account lifecycle", () => {
       expect(serialized).not.toMatch(new RegExp(`\\b${code}\\b`));
     }
     expect(afterRows[0]).toMatchObject({ last_error: null });
+  });
+});
+
+describe("Cache-Control on /api/auth responses produced before the auth router", () => {
+  it("should send no-store when the JSON body is malformed or too large", async () => {
+    const malformed = await request(apps.publicApp)
+      .post("/api/auth/login")
+      .set("Content-Type", "application/json")
+      .send("{bad");
+    const oversize = await request(apps.publicApp)
+      .post("/api/auth/login")
+      .set("Content-Type", "application/json")
+      .send(JSON.stringify({ email: "a@example.test", password: "x".repeat(200_000) }));
+
+    expect(malformed.status).toBe(400);
+    expect(oversize.status).toBeGreaterThanOrEqual(400);
+    expect(malformed.headers["cache-control"]).toBe("no-store");
+    expect(oversize.headers["cache-control"]).toBe("no-store");
+  });
+
+  it("should answer OPTIONS with the 404 envelope and no-store when the request is not a CORS preflight", async () => {
+    const response = await request(apps.publicApp).options("/api/auth/login");
+
+    expectErrorEnvelope(response.body, "NotFound");
+    expect(response.status).toBe(404);
+    expect(response.headers["cache-control"]).toBe("no-store");
+  });
+
+  it("should not put no-store on the JWKS response", async () => {
+    const response = await request(apps.publicApp).get("/.well-known/jwks.json");
+
+    expect(response.headers["cache-control"]).toBe("public, max-age=300");
+  });
+});
+
+describe("Redis override wiring", () => {
+  it("should apply the container's Redis to the route limiters when an override is supplied", async () => {
+    const unreachable = createUnreachableRedis();
+    const overridden = buildTestApps({ overrides: { emailPort: email, redis: unreachable } });
+    const user = await seedUser({ email: "override.redis@example.test" });
+    const attempt = (): Promise<request.Response> =>
+      request(overridden.publicApp).post("/api/auth/login").send({ email: user.email, password: TEST_PASSWORD });
+
+    try {
+      // login-ip-email is 5/min on a healthy Redis; the unreachable override degrades it to 2 per task.
+      const statuses = [(await attempt()).status, (await attempt()).status, (await attempt()).status];
+
+      expect(statuses).toEqual([200, 200, 429]);
+    } finally {
+      unreachable.disconnect();
+    }
   });
 });

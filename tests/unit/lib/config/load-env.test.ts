@@ -79,3 +79,78 @@ describe("loadEnv", () => {
     expect(keysOf({ ...VALID, DATABASE_URL: "http://localhost:5432/db" })).toContain("DATABASE_URL");
   });
 });
+
+describe("loadEnv trust proxy", () => {
+  const PRODUCTION = {
+    ...VALID,
+    NODE_ENV: "production",
+    EMAIL_PROVIDER_BASE_URL: "https://api.resend.com",
+    DATABASE_URL: "postgres://identity:identity@db.example.test:5432/vcare_identity?sslmode=require",
+    REDIS_URL: "rediss://cache.example.test:6379",
+  };
+
+  it("should reject TRUST_PROXY_HOPS when it is unset and NODE_ENV is production", () => {
+    expect(keysOf(PRODUCTION)).toContain("TRUST_PROXY_HOPS");
+  });
+
+  it("should reject TRUST_PROXY_HOPS when it is 0 and NODE_ENV is production", () => {
+    expect(keysOf({ ...PRODUCTION, TRUST_PROXY_HOPS: "0" })).toContain("TRUST_PROXY_HOPS");
+  });
+
+  it("should accept an explicit hop count and default the internal listener to 0 when in production", () => {
+    const env = loadEnv({ ...PRODUCTION, TRUST_PROXY_HOPS: "2" });
+
+    expect(env.TRUST_PROXY_HOPS).toBe(2);
+    expect(env.INTERNAL_TRUST_PROXY_HOPS).toBe(0);
+  });
+});
+
+describe("loadEnv production hardening", () => {
+  const SECURE = {
+    ...VALID,
+    NODE_ENV: "production",
+    TRUST_PROXY_HOPS: "1",
+    DATABASE_URL: "postgres://identity:identity@db.example.test:5432/vcare_identity?sslmode=require",
+    REDIS_URL: "rediss://cache.example.test:6379",
+    OTP_PEPPER: "a-production-pepper-with-at-least-32-characters",
+    APP_BASE_URL: "https://app.example.test",
+  };
+
+  it("should accept a fully hardened production environment", () => {
+    expect(() => loadEnv(SECURE)).not.toThrow();
+  });
+
+  it("should reject REDIS_URL when it is not rediss and NODE_ENV is production", () => {
+    expect(keysOf({ ...SECURE, REDIS_URL: "redis://cache.example.test:6379" })).toContain("REDIS_URL");
+  });
+
+  it("should reject DATABASE_URL when sslmode is missing and NODE_ENV is production", () => {
+    expect(
+      keysOf({ ...SECURE, DATABASE_URL: "postgres://identity:identity@db.example.test:5432/vcare_identity" }),
+    ).toContain("DATABASE_URL");
+  });
+
+  it("should reject DATABASE_URL when sslmode is disable and NODE_ENV is production", () => {
+    expect(
+      keysOf({ ...SECURE, DATABASE_URL: "postgres://identity:identity@db.example.test:5432/x?sslmode=disable" }),
+    ).toContain("DATABASE_URL");
+  });
+
+  it("should reject OTP_PEPPER when it is the development placeholder and NODE_ENV is production", () => {
+    expect(keysOf({ ...SECURE, OTP_PEPPER: "local-development-otp-pepper-change-me" })).toContain("OTP_PEPPER");
+  });
+
+  it("should reject APP_BASE_URL when it is http and NODE_ENV is production", () => {
+    expect(keysOf({ ...SECURE, APP_BASE_URL: "http://app.example.test" })).toContain("APP_BASE_URL");
+  });
+
+  it("should keep plain redis, no sslmode, the dev pepper and http base url working when NODE_ENV is development", () => {
+    expect(() =>
+      loadEnv({
+        ...VALID,
+        OTP_PEPPER: "local-development-otp-pepper-change-me",
+        APP_BASE_URL: "http://localhost:5173",
+      }),
+    ).not.toThrow();
+  });
+});

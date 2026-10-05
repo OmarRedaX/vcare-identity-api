@@ -2,8 +2,8 @@
 title: Identity Service — Service Card
 owner: identity-team
 service: identity-service
-status: draft
-last_verified: 2026-09-15
+status: ready
+last_verified: 2026-10-04
 tags: [service-card, catalog, identity]
 related: [index, system-design, runbook, data-model, api, design-baseline, deployment]
 sync_to_hub: catalog/identity-service.card.md
@@ -19,7 +19,7 @@ sync_to_hub: catalog/identity-service.card.md
 | **Name** | identity-service |
 | **Repo** | `vcare-identity-api` |
 | **Owner** | identity-team |
-| **Status** | design (no code yet); 2026-09-15 system-design baseline accepted, contract changes pending |
+| **Status** | `foundation` + `auth` built, tested and reviewed (2026-10-04): both listeners, health probes, and the whole public auth surface — registration, login, refresh rotation with reuse detection, logout, password reset by 6-digit code, change password, own profile, JWKS — plus the outbox email worker and retention purges. `users` (admin) and `/internal/*` are contract-only. All accepted contract changes are applied |
 | **Tier** | 1 — if it is down, nobody can log in or refresh. Target 99.95 % monthly (ADR 0009) |
 | **Runtime** | Node.js 24 LTS + TypeScript, Express 5; one image, deployed as `identity-api` (public `PORT` 3000 + internal `INTERNAL_PORT` 3100) and `identity-worker` (outbox + purges) on managed containers (hub ADR 0007) |
 | **Datastores** | PostgreSQL (own identity database, Multi-AZ); Redis (rate limits, idempotency — **Tier 2**, degrades without outage, ADR 0008) |
@@ -41,7 +41,7 @@ documents, or any clinical data (care-service).
 | Kind | Target | For | Sync? |
 |---|---|---|---|
 | — | none | Identity makes **no synchronous calls** to other vcare services | — |
-| provider (async) | email provider | registration codes, account-exists notices, password-reset emails — sent only by `identity-worker` from the outbox; failure never fails a request | async |
+| provider (async) | email provider (Resend over HTTPS; `capture` adapter locally) | registration codes, account-exists notices, password-reset codes — sent only by `identity-worker` from the outbox, with backoff and a dead-letter state; failure never fails a request | async |
 
 ## Called by
 | Caller | Endpoint | Why | Failure policy (caller side) |
@@ -55,17 +55,17 @@ documents, or any clinical data (care-service).
 | web clients | `/api/auth/*`, `/api/users/*` (single origin, hub ADR 0005) | end-user auth and admin user management (patients only for status) | — |
 
 ## Endpoint families
-Current contract shown; approved target in [design-baseline.md](./architecture/design-baseline.md) (replaces
-`register`, removes `verify-email` / `resend-verification`, adds `register/start` and `register/complete`, splits health).
+Implemented today: **auth**, **keys**, **health**. `users` (admin) and the two internal families are
+contract-only until their modules are built.
 
 | Family | Paths | Listener |
 |---|---|---|
-| auth | `/api/auth/register`, `login`, `refresh`, `logout`, `verify-email`, `resend-verification`, `forgot-password`, `reset-password`, `change-password`, `me` | public |
+| auth (built) | `/api/auth/register/start`, `register/complete`, `login`, `refresh`, `logout`, `forgot-password`, `reset-password`, `change-password`, `me` | public |
 | users (admin) | `/api/users`, `/api/users/{id}`, `/api/users/{id}/status`, `/api/users/{id}/sessions` | public |
-| keys | `/.well-known/jwks.json` | public |
+| keys (built) | `/.well-known/jwks.json` | public |
 | service-auth | `/internal/auth/token` | internal |
 | internal-users | `/internal/users`, `/internal/users/{id}/status` | internal |
-| health | `/api/health`, `/internal/health` | both |
+| health (built) | `/api/health/live`, `/api/health/ready`, `/internal/health/live`, `/internal/health/ready` — load balancers only, not routed by the edge | both |
 
 ## Events
 None in MVP (HTTP-only). Future: `user.registered`, `user.status_changed`, carried by the existing outbox

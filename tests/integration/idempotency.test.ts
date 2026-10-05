@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import path from "node:path";
 import { type Express, Router } from "express";
 import type Redis from "ioredis";
 import request from "supertest";
@@ -151,6 +155,60 @@ describe("idempotent writes", () => {
     const conflicting = first.status === 409 ? first : second;
     expectErrorEnvelope(conflicting.body, "Conflict");
     expect(conflicting.headers["retry-after"]).toBe("1");
+  });
+
+  it("should declare Retry-After on the contract Conflict response that carries the in-flight 409", () => {
+    const contract = fs.readFileSync(path.resolve(process.cwd(), "contracts", "openapi.yaml"), "utf8");
+    const start = contract.search(/^ {4}Conflict:/m);
+    const block = contract.slice(start, contract.search(/^ {4}InvalidStatusTransition:/m));
+
+    expect(block).toContain("Retry-After: { $ref: '#/components/headers/RetryAfter' }");
+  });
+
+  it("should replay the original 201 when the client disconnects mid-flight and retries with the same key and body", async () => {
+    const key = randomUUID();
+    const server = http.createServer(apps.publicApp);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      await new Promise<void>((resolve) => {
+        const body = JSON.stringify({ a: 1 });
+        const aborted = http.request(
+          {
+            host: "127.0.0.1",
+            port,
+            method: "POST",
+            path: "/api/__test/idem?delayMs=300",
+            headers: { "content-type": "application/json", "idempotency-key": key, "content-length": Buffer.byteLength(body) },
+          },
+          () => undefined,
+        );
+        aborted.on("error", () => undefined);
+        aborted.write(body);
+        aborted.end();
+        setTimeout(() => {
+          aborted.destroy();
+          resolve();
+        }, 80);
+      });
+
+      // While the abandoned handler is still running the key must still answer 409, not start a second run.
+      const concurrent = await request(apps.publicApp)
+        .post("/api/__test/idem")
+        .set("Idempotency-Key", key)
+        .send({ a: 1 });
+      expect(concurrent.status).toBe(409);
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const retried = await request(apps.publicApp).post("/api/__test/idem").set("Idempotency-Key", key).send({ a: 1 });
+      expect(retried.status).toBe(201);
+      expect(testCounters.idem).toBe(1);
+      expect((retried.body as { data: { runs: number } }).data.runs).toBe(1);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it("should re-run the handler when the first attempt failed with 500", async () => {

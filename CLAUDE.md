@@ -194,7 +194,7 @@ Unknown errors become `InternalError` (500) with no stack or internals in the bo
 
 **Pagination:** every list is **cursor-based keyset** — `?cursor=<opaque>&limit=<1..100, default 20>`; the cursor encodes `(sortValue, id)` so ties are stable. Response `meta: { nextCursor, hasMore, count }`. Fetch `limit + 1`. Lists are filterable via whitelisted query params only.
 
-**Idempotency:** `Idempotency-Key` (UUID) is **required** on `POST /api/auth/register/complete` and optional on other POSTs. When Redis is unavailable the middleware is skipped and database constraints stop duplicates (ADR 0008). Stored in Redis for 24 h keyed by `(route, principal-or-ip, key)` with a hash of the request body; same key + different body → `422 IdempotencyConflict`; same key + same body → replay the original status and body.
+**Idempotency:** `Idempotency-Key` (UUID) is **required** on `POST /api/auth/register/complete` and optional on other POSTs. When Redis is unavailable the middleware is skipped and database constraints stop duplicates (ADR 0008). Stored in Redis for 24 h keyed by `(route, principal-or-ip, key)` with a hash of the request body; same key + different body → `422 IdempotencyConflict`; same key + same body → replay the original status and body; same key while the first request is still in flight → immediate `409 Conflict` with `Retry-After: 1`.
 
 **Status codes:** 200 read/update · 201 create · 204 no body · 400 `ValidationFailed` · 401 `Unauthorized`/`TokenExpired`/`InvalidCredentials` · 403 `Forbidden`/account-state errors · 404 `NotFound` · 409 `Conflict` · 422 `IdempotencyConflict` · 429 `RateLimited` · 500 `InternalError` · 503 dependency down (health only).
 
@@ -216,7 +216,7 @@ Unknown errors become `InternalError` (500) with no stack or internals in the bo
 | `ServiceTokenRequired` | 401 | `/internal/*` called without a valid service token (incl. with a user token) |
 | `InsufficientScope` | 403 | service token lacks the required scope |
 | `NotFound` | 404 | resource absent (or not visible to the caller) |
-| `Conflict` | 409 | e.g. email already registered |
+| `Conflict` | 409 | e.g. email already registered, or an `Idempotency-Key` whose first request is still in flight (with `Retry-After: 1`) |
 | `InvalidStatusTransition` | 409 | status change not allowed by "Domain rules" |
 | `IdempotencyConflict` | 422 | same key, different body |
 | `RateLimited` | 429 | limiter tripped |

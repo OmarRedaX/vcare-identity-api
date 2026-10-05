@@ -30,6 +30,9 @@ function clientStatus(err: unknown): number | undefined {
 }
 
 function send(res: Response, requestId: string, error: AppError, details: readonly ErrorDetail[]): void {
+  if (error.retryAfterSeconds !== undefined && !res.hasHeader("Retry-After")) {
+    res.setHeader("Retry-After", String(Math.max(1, error.retryAfterSeconds)));
+  }
   const body: ErrorBody = {
     success: false,
     error: {
@@ -46,13 +49,16 @@ function send(res: Response, requestId: string, error: AppError, details: readon
  * The one error envelope (CLAUDE.md -> API conventions). The body never carries a stack, SQL, driver text or
  * the message of an unknown error; the handler never logs bodies, headers, query strings or cookies.
  */
-export function errorHandler(err: unknown, req: Request, res: Response, next: NextFunction): void {
+// Express identifies error middleware by its four-argument arity, so `_next` must stay.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
   captureRoute(req, res);
   const requestId = req.requestId;
 
   if (res.headersSent) {
+    // Express's default handler would print the raw stack to stderr; log once as JSON and drop the socket.
     logger.error("response_error_after_headers", { err });
-    next(err);
+    res.destroy();
     return;
   }
 

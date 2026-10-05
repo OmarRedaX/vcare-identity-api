@@ -73,3 +73,16 @@ describe("CORS", () => {
     expect(response.headers["access-control-allow-credentials"]).toBeUndefined();
   });
 });
+
+describe("CORS preflight on /api/auth", () => {
+  it("should answer a development preflight with 204 and no-store", async () => {
+    const response = await request(apps.publicApp)
+      .options("/api/auth/login")
+      .set("Origin", ORIGIN)
+      .set("Access-Control-Request-Method", "POST");
+
+    expect(response.status).toBe(204);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["access-control-allow-origin"]).toBe(ORIGIN);
+  });
+});

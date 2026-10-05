@@ -4,14 +4,15 @@ owner: identity-team
 service: identity-service
 module: foundation
 status: in-progress
-last_verified: 2026-09-16
+diataxis: reference
+last_verified: 2026-10-04
 tags: [tasks, foundation, bootstrap, infrastructure, health, docker, ci]
-related: [foundation-spec, foundation-brainstorm, infrastructure, deployment, overview, quickstart, adr-0014-health-liveness-readiness-split, adr-0015-foundation-runtime-dependencies]
+related: [foundation-spec, foundation-brainstorm, foundation-manual-qa, infrastructure, deployment, overview, quickstart, adr-0014-health-liveness-readiness-split, adr-0015-foundation-runtime-dependencies]
 ---
 
 # foundation — Tasks
 
-Source: [spec.md](./spec.md) (status `ready`). Each task is tagged with its step from CLAUDE.md →
+Source: [spec.md](./spec.md) (status `implemented`, version 1.1.0 — as-built notes in §15). Each task is tagged with its step from CLAUDE.md →
 "Build order for a new module". Statuses are kept live while building.
 
 ## Legend
@@ -92,6 +93,18 @@ between the units; the hub sync and doc reconciliation happen after both land.
 - [x] (manual-qa) `npm install`, `npm run lint`, `npm run typecheck` green
 - [x] (manual-qa) test stack up → `npm run migrate` applies, `rollback --all` reverses (citext dropped), `migrate` re-applies
 - [x] (manual-qa) `GET /api/health/ready` returns 200 `{"status":"ok","checks":{"database":"up","redis":"up"}}` on both listeners, with `X-Request-Id` and `Cache-Control: no-store`; cross-listener paths return the 404 envelope
+- [x] (manual-qa) CURL run recorded in `docs/foundation/manual-qa.md` + repeatable `scripts/curl-test-foundation.sh` — 35 cases, 35 pass / 0 fail (2026-09-16, ports 3020/3120 because host 3000 is occupied); scripted re-run `RUN_INFRA_CASES=1 bash scripts/curl-test-foundation.sh` → 57 assertions, 0 fail; readiness table rows `up/up`, `up/down → degraded`, `down → 503` all verified against `contracts/openapi.yaml`
 
 ### docs
-- [ ] (docs) `/update-docs foundation` follow-ups listed in spec §12 (infrastructure, quickstart, overview, api, runbook, service-card, INDEX, hub sync) — **not** done in this run
+- [x] (docs) `/update-docs foundation` follow-ups listed in spec §12 (infrastructure, quickstart, overview, api, runbook, service-card, INDEX) — done 2026-09-16, plus `deployment.md` (migrate command, `INTERNAL_HOST`/`TRUST_PROXY_HOPS`), `system-design.md`, `design-baseline.md` status line, INDEX rows for `tasks.md`, `manual-qa.md`, ADR 0015; spec bumped to 1.1.0 with As-built notes (§15). No contract drift found. The `CLAUDE.md` `lib/http/route-capture.ts` line is left for a human (spec §15.4)
+- [x] (docs) hub sync — `cd ../vcare-hub && scripts/sync-from-spoke.sh identity-service ../vcare-identity-api` run 2026-09-16; hub card updated (contract copy already matched), hub freshness check OK
+
+### follow-ups (reopened by `/update-docs`, 2026-09-16)
+- [x] (enums-errors-types) `src/lib/knex/knexfile.ts` — route Knex's own warnings/errors through `Logger` so a Postgres outage writes only JSON lines (manual-qa.md → Failures / notes; spec §15.3)
+
+### review fixes (`/develop foundation --fix-review`, 2026-10-04)
+- [x] (contract) `error.details` required; health operations declare `500 InternalError`; `additionalProperties: false` on health schemas; generic `CacheControlNoStore`
+- [x] (service) idempotency 429 delete + orphan-claim compensation; shutdown keep-alive drain and bounded pool close; readiness probe pool; client-side Postgres/Redis timeouts; trust-proxy env split; log error policy; OPTIONS 404; `degraded` flag; 499 requestId; cursor sort kinds; boot_failed; migration names
+- [x] (docs) spec §15.5, infrastructure, deployment, capacity, runbook, quickstart; compose/Dockerfile/curl script
+- [x] (tests) unit + integration additions for each fix (typecheck green; `npm test` 460+ green; integration green except a pre-existing auth `change-password` AccountSuspended case)
+- [ ] (docs) Care parity and hub contract sync for the items marked "Care parity" in the review (listed in the hand-off)

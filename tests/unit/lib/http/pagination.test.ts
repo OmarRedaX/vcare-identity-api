@@ -85,3 +85,20 @@ describe("buildPage", () => {
     expect(page.meta).toEqual({ nextCursor: null, hasMore: false, count: 0 });
   });
 });
+
+describe("decodeCursor sort kinds", () => {
+  const forge = (v: unknown): string => Buffer.from(JSON.stringify({ v, id: 1 }), "utf8").toString("base64url");
+
+  it("should throw ValidationFailed on cursor when a timestamp sort receives a non-ISO value", () => {
+    expectValidationFailedOnCursor(() => decodeCursor(forge("abc"), "iso-timestamp"));
+    expectValidationFailedOnCursor(() => decodeCursor(forge(5), "iso-timestamp"));
+  });
+
+  it("should accept an ISO-8601 instant when a timestamp sort is requested", () => {
+    expect(decodeCursor(forge("2026-09-16T00:00:00.123Z"), "iso-timestamp").v).toBe("2026-09-16T00:00:00.123Z");
+  });
+
+  it("should throw ValidationFailed on cursor when a numeric sort receives a string", () => {
+    expectValidationFailedOnCursor(() => decodeCursor(forge("1"), "number"));
+  });
+});

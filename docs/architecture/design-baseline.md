@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: accepted
 diataxis: explanation
-last_verified: 2026-09-15
+last_verified: 2026-09-16
 tags: [architecture, system-design, requirements, api, data-model, decisions]
 related: [system-design, capacity, deployment, api, data-model, auth-tokens, infrastructure, future, landscape]
 ---
@@ -22,6 +22,9 @@ deployment topology, release pipeline — are authored in the hub (`architecture
 > Status of the contract: `contracts/openapi.yaml` has **not** been changed yet. Until it is (via
 > `/construct-spec` + `/develop`), the contract still describes the pre-baseline API, and
 > [api.md](./api.md) mirrors it. Section 4 is the change list.
+>
+> **Update 2026-09-16:** the health split (section 4, item 7) was applied to the contract on 2026-09-15 and built
+> by the `foundation` module. The remaining items are still pending; the paragraph above holds for them.
 
 ## 1. Requirement gaps and decisions
 
@@ -98,6 +101,10 @@ Retention (worker): `refresh_tokens` 30 d after expiry/revocation · `password_r
 
 Land via `/construct-spec auth` (and `users`, `health`) → `/develop`. **Care's contract is unaffected**: no
 `/internal/*` shape changes.
+
+> **Status (2026-09-16):** all items are applied to the contract. Item 7 (applied 2026-09-15) is built by the
+> `foundation` module ([foundation/spec.md](../foundation/spec.md) §3, §15). Items 1–6, 8, and 9 (applied
+> 2026-09-16) are contract-only until the registration, auth, and users modules are built.
 
 1. Remove `POST /api/auth/register`, `POST /api/auth/verify-email`, `POST /api/auth/resend-verification`.
 2. Add `POST /api/auth/register/start` — `202`; errors `ValidationFailed`, `IdempotencyConflict`, `RateLimited`; rate limits 3/h per email, 5/h per IP; `x-roles: public`.

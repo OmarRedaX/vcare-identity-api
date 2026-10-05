@@ -1,3 +1,5 @@
+import { AppError } from "../error/AppError";
+
 /**
  * Defence in depth for CLAUDE.md -> Privacy and logging: secrets and PII are never passed to the logger,
  * and if they are, they never reach stdout. Mechanics are identical in care-service; the key list differs.
@@ -19,7 +21,17 @@ export const REDACTED_KEYS: readonly string[] = [
   "clientSecretHash",
   "tokenHash",
   "codeHash",
+  // One-time secrets (ADR 0006, ADR 0017). `code` is deliberately absent: it would hide AppError.code in
+  // error logs — callers simply never pass a registration or reset code (spec §9.4).
+  "otp",
+  "otpPepper",
+  "registrationCode",
+  "resetCode",
   "privateJwk",
+  "jwtPrivateKeys",
+  "apiKey",
+  "emailProviderApiKey",
+  "deviceInfo",
   "authorization",
   "cookie",
   "set-cookie",
@@ -44,14 +56,41 @@ function isDropped(value: unknown): boolean {
   return typeof value === "function" || typeof value === "symbol";
 }
 
+const SQLSTATE = /^[0-9A-Z]{5}$/;
+
+/** Stack frames only: the header line (and any multi-line message) can embed the offending input. */
+function stackFrames(stack: string): string {
+  return stack
+    .split("\n")
+    .filter((line) => /^\s+at\s/.test(line))
+    .join("\n");
+}
+
+/**
+ * Non-AppError errors are logged without their message: driver messages carry the offending input value
+ * (e.g. Postgres class-22 "invalid input syntax ... \"person@example.test\"") and arbitrary Errors may embed
+ * secrets. AppError messages are fixed strings and stay verbatim.
+ */
 function serializeError(err: Error, includeStack: boolean): Record<string, unknown> {
-  const out: Record<string, unknown> = { name: err.name, message: err.message };
-  const code = (err as unknown as Record<string, unknown>).code;
+  const record = err as unknown as Record<string, unknown>;
+  const code = record.code;
+  const isAppError = err instanceof AppError;
+  const isDriverError = typeof code === "string" && SQLSTATE.test(code) && typeof record.routine === "string";
+
+  const out: Record<string, unknown> = { name: err.name };
+  out.message = isAppError ? err.message : isDriverError ? `pg_error:${code}` : `error:${err.name}`;
   if (typeof code === "string") {
     out.code = code;
   }
+  if (isDriverError) {
+    for (const key of ["constraint", "table", "column", "routine"]) {
+      if (typeof record[key] === "string") {
+        out[key] = record[key];
+      }
+    }
+  }
   if (includeStack && typeof err.stack === "string") {
-    out.stack = err.stack;
+    out.stack = stackFrames(err.stack);
   }
   return out;
 }

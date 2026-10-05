@@ -1,3 +1,5 @@
+export type CursorSortKind = "iso-timestamp" | "string" | "number";
+
 export interface CursorPayload {
   v: string | number;
   id: number;

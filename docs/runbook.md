@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: how-to
-last_verified: 2026-09-15
+last_verified: 2026-10-04
 tags: [runbook, operations, on-call, identity]
-related: [service-card, auth-tokens, service-auth, infrastructure, deployment]
+related: [service-card, auth-tokens, service-auth, infrastructure, deployment, foundation-manual-qa]
 ---
 
 # Runbook — identity-service
@@ -14,14 +14,17 @@ related: [service-card, auth-tokens, service-auth, infrastructure, deployment]
 On-call guide. Task-oriented; assumes the service is deployed. Identity is **Tier 1**: an outage stops
 all logins and refreshes platform-wide, and blocks Care's Case 3 suspensions (Care retries and alerts).
 
-> Status: design (no code yet). Alert names and procedures are the contract for the observability and
-> ops work done when the modules are built.
+> Status (2026-09-16): the `foundation` module is built — health probes, graceful shutdown, structured logs,
+> and the Redis-down behaviour below are real. Auth, users, sessions, service-auth, and the outbox are not built
+> yet: their alerts and procedures are the contract for the observability and ops work done when those modules
+> land.
 
 ## At a glance
 | | |
 |---|---|
-| Health (public) | `GET /api/health` → `{ status, checks: { database, redis } }` (200 / 503); after ADR 0014 ships: `/api/health/live` and `/api/health/ready` |
-| Health (internal) | `GET /internal/health` on the internal listener (private network); after ADR 0014: `/internal/health/live`, `/internal/health/ready` |
+| Health (public) | `GET /api/health/live` → `200 {"status":"ok"}` (process only, never 503); `GET /api/health/ready` → `{ status: ok \| degraded \| down, checks: { database, redis } }` — 503 with `down` only when Postgres is down or the task is shutting down; Redis down alone → 200 `degraded` (ADR 0014) |
+| Health (internal) | same pair on the internal listener: `/internal/health/live`, `/internal/health/ready` (private network, no token) |
+| Health probe checks | readiness runs Postgres `SELECT 1` and Redis `PING` concurrently, 500 ms each; the edge never routes health |
 | Availability target | 99.95 % monthly; RPO 0 (AZ) / ≤ 5 min; RTO ≤ 5 min (AZ) / ≤ 4 h (region) — ADR 0009 |
 | Topology | `identity-api` ×2..6, `identity-worker` ×1 — [architecture/deployment.md](./architecture/deployment.md); platform view: hub `architecture/deployment.md` |
 | Keys | `GET /.well-known/jwks.json` (must always return ≥ 1 key) |
@@ -38,11 +41,11 @@ all logins and refreshes platform-wide, and blocks Care's Case 3 suspensions (Ca
 | `AuthFailureSpike` | `401` rate on login > 5× baseline, or `InvalidCredentials` > 500/min | credential stuffing, brute force | confirm limiters are active (Redis healthy); identify top source IPs from ingress logs; block at ingress/WAF; watch for successful logins from the same sources and revoke those sessions |
 | `InternalUsersLatencyHigh` | `/internal/users` p95 > 50 ms for 10 min | missing/unused index after a migration, large `ids` batches, DB contention, pool exhaustion | `EXPLAIN` the `id = ANY($1)` query; check pool saturation and slow-query log; Care degrades to cached profiles (Case 2) so this is not user-facing yet — fix before it becomes an outage |
 | `JwksUnavailable` | `/.well-known/jwks.json` non-200 or empty `keys` from synthetic probe for 2 min | bad `JWT_PRIVATE_KEYS` deploy, process crash loop, ingress misroute | check the latest deploy and env validation errors at boot; roll back the config; consumers keep their cached JWKS for 5 min — after that, Care rejects every token |
-| `HealthCheckFailing` | readiness 503 for 2 min | Postgres unreachable, or tasks stuck in shutdown | read `checks`; check DB connectivity, credentials, and a Multi-AZ failover in progress; Redis alone never fails readiness (ADR 0014) |
-| `RateLimiterDegraded` | `rate_limiter_degraded` for 2 min | Redis unreachable or failing over | check managed Redis status; credential routes run on stricter per-task limits (ADR 0008) — watch `AuthFailureSpike`, tighten WAF rules if an attack coincides |
+| `HealthCheckFailing` | readiness 503 for 2 min | Postgres unreachable, or tasks stuck in shutdown (the probe has its own connection, so request-pool saturation alone does not fail readiness) | read `checks` in the body (`database: down` vs. shutdown with both `up`) and the `readiness_failed` warn log (`checks`, `shuttingDown`); check DB connectivity, credentials, and a Multi-AZ failover in progress; a shutdown that overruns `SHUTDOWN_TIMEOUT_MS` logs `shutdown_timeout` with `unfinishedRequests`. Redis alone never fails readiness (ADR 0014). During a Postgres outage Knex also logs `knex_warn` lines (`detail: Acquire connection error …`) — expected, not a second incident |
+| `RateLimiterDegraded` | `rate_limiter_degraded` for 2 min | Redis unreachable or failing over | check managed Redis status and `redis_error` / `redis_connect_failed` logs; readiness shows `redis: down` with 200 `degraded`; credential routes run on stricter per-task limits (ADR 0008) and idempotency is skipped (`idempotency_skipped`) — watch `AuthFailureSpike`, tighten WAF rules if an attack coincides. The client reconnects on its own; no restart needed. If Redis is connected but silent, look for `redis_breaker_open` (warn, once per trip) followed by a steady stream of `rate_limiter_degraded` / `idempotency_skipped` with no `redis_error`: the breaker is open and skips Redis for `REDIS_BREAKER_COOLDOWN_MS` (default 15 s), then logs `redis_breaker_half_open` and either `redis_breaker_closed` (recovered) or `redis_breaker_open` again (still unresponsive). Repeated open/half-open cycles mean Redis is wedged: fail over or restart it; the service needs no restart |
 | `OutboxLagHigh` | oldest pending outbox job > 2 min for 5 min | worker down, email provider slow/erroring, DB contention | check `identity-worker` task health and logs (`last_error` classes); scale worker to 2; if the provider is down, registration codes and resets are delayed — post a status notice |
 | `OutboxDeadJobs` | any job in `dead` | persistent provider rejection (bad address, auth) | `SELECT type, last_error, count(*) FROM outbox_jobs WHERE status='dead' GROUP BY 1,2;` fix the cause; re-queue with `UPDATE … SET status='pending', attempts=0, run_after=now()` via the audited ops console |
-| `DbPoolSaturated` | pool wait p95 > 200 ms for 5 min | traffic spike, slow queries, too few tasks | check slow-query log and `EXPLAIN` hot paths; scale out `identity-api`; confirm purge batches are not running unthrottled |
+| `DbPoolSaturated` (planned: pool metrics are not emitted yet) | pool wait p95 > 200 ms for 5 min | traffic spike, slow queries, too few tasks | check slow-query log and `EXPLAIN` hot paths; scale out `identity-api`; confirm purge batches are not running unthrottled |
 
 Additional signal to watch (no page): `service_token_denied` warnings — a spike usually means a Care
 deploy with a rotated or wrong secret, or a user token sent to `/internal/*`.

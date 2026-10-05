@@ -32,3 +32,26 @@ export interface TestRouterDeps {
   logger?: Logger;
   degrade?: DegradeMode;
 }
+
+/** Every exported function of a jest.mock()ed module, typed as a jest.Mock (unit tests only). */
+export type MockedModule<T> = { [K in keyof T]: jest.Mock };
+
+/** Options for `seedUser` — everything defaults to a synthetic, fully valid patient account. */
+export interface SeedUserOptions {
+  email?: string;
+  password?: string;
+  passwordHash?: string;
+  role?: import("../../src/lib/rbac/types").Role;
+  status?: import("../../src/lib/rbac/types").AccountStatus;
+  fullName?: string;
+  phone?: string | null;
+  timezone?: string;
+  locale?: string;
+}
+
+/** A clock the test moves by hand (spec §2.6: tests control "now" without faking Postgres). */
+export interface MutableClock {
+  clock: import("../../src/lib/time/types").Clock;
+  advance(ms: number): void;
+  set(next: Date): void;
+}

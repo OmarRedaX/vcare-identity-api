@@ -5,10 +5,11 @@ import { env } from "../config/env";
 import { RateLimited } from "../error/errors";
 import { captureRoute } from "../http/route-capture";
 import { logger as defaultLogger } from "../logger/logger";
-import { isRedisReady, redis as defaultRedis, withTimeout } from "../redis/redis";
+import { redis as defaultRedis } from "../redis/redis";
+import { guardedRedisCall, redisUsable } from "../redis/redis-guard";
 import { InProcessLimiter } from "./in-process-limiter";
 import { SLIDING_WINDOW_SCRIPT } from "./sliding-window.lua";
-import type { RateLimitDeps, RateLimitOptions } from "./types";
+import type { RateLimitDecision, RateLimitDeps, RateLimitOptions, SlidingWindowOptions } from "./types";
 
 export const RATE_LIMIT_REDIS_TIMEOUT_MS = 50;
 
@@ -43,7 +44,8 @@ async function callScript(
     member: string,
   ) => Promise<unknown>;
 
-  const raw = await withTimeout(
+  const raw = await guardedRedisCall(
+    client,
     command.call(client, key, String(limit), String(windowMs), randomUUID()),
     RATE_LIMIT_REDIS_TIMEOUT_MS,
   );
@@ -54,80 +56,106 @@ async function callScript(
   return [Number(raw[0]), Number(raw[1])];
 }
 
-/**
- * Route-level limiter (CLAUDE.md -> Security rules). Runs before validation and hashing.
- * The subject is never logged; callers hash PII subjects themselves.
- */
-export function rateLimit(options: RateLimitOptions, deps?: RateLimitDeps): RequestHandler {
-  const resolved: RateLimitDeps = deps ?? {
+function defaultDeps(): RateLimitDeps {
+  return {
     redis: defaultRedis,
     logger: defaultLogger,
     fallbackDivisor: env.RATE_LIMIT_FALLBACK_DIVISOR,
     now: () => Date.now(),
   };
+}
 
-  const deny = (
-    res: Parameters<RequestHandler>[1],
-    next: Parameters<RequestHandler>[2],
-    retryAfterSeconds: number,
-    degraded: boolean,
-  ): void => {
-    res.setHeader("Retry-After", String(Math.max(1, retryAfterSeconds)));
-    resolved.logger.warn("rate_limited", { limiter: options.name, degraded });
-    resolved.logger.metric("rate_limited", 1, "Count", { limiter: options.name });
-    next(RateLimited);
-  };
+function logDegraded(name: string, mode: string, deps: RateLimitDeps): void {
+  const now = deps.now();
+  const last = lastDegradeLogAt.get(name) ?? 0;
+  if (now - last < DEGRADE_LOG_INTERVAL_MS) {
+    return;
+  }
+  lastDegradeLogAt.set(name, now);
+  deps.logger.warn("rate_limiter_degraded", { limiter: name, mode });
+  deps.logger.metric("rate_limiter_degraded", 1, "Count", { limiter: name });
+}
 
-  const logDegraded = (mode: string): void => {
-    const now = resolved.now();
-    const last = lastDegradeLogAt.get(options.name) ?? 0;
-    if (now - last < DEGRADE_LOG_INTERVAL_MS) {
-      return;
-    }
-    lastDegradeLogAt.set(options.name, now);
-    resolved.logger.warn("rate_limiter_degraded", { limiter: options.name, mode });
-    resolved.logger.metric("rate_limiter_degraded", 1, "Count", { limiter: options.name });
-  };
+function degradedDecision(
+  options: SlidingWindowOptions,
+  key: string,
+  deps: RateLimitDeps,
+): RateLimitDecision {
+  if (options.degrade === "fail-open") {
+    logDegraded(options.name, "fail-open", deps);
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+  logDegraded(options.name, "fallback", deps);
+  const decision = processLimiter.hit(
+    key,
+    fallbackLimit(options.limit, deps.fallbackDivisor),
+    options.windowMs,
+    deps.now(),
+  );
+  return decision.allowed ? decision : { ...decision, degraded: true };
+}
+
+/**
+ * The limiter core, usable without a route (the refresh limiter's subject — the token family — is only known
+ * after the database lookup, spec §4.4). Same Redis script, 50 ms budget, degrade modes, logs and metrics as
+ * the middleware. Never throws; the subject is never logged (callers hash PII subjects themselves).
+ */
+export async function consumeRateLimit(
+  options: SlidingWindowOptions,
+  subject: string,
+  deps?: RateLimitDeps,
+): Promise<RateLimitDecision> {
+  const resolved = deps ?? defaultDeps();
+  const key = `rl:${options.name}:${subject}`;
+
+  if (!redisUsable(resolved.redis)) {
+    return degradedDecision(options, key, resolved);
+  }
+
+  let reply: [number, number];
+  try {
+    reply = await callScript(resolved.redis, key, options.limit, options.windowMs);
+  } catch {
+    return degradedDecision(options, key, resolved);
+  }
+
+  const [allowed, retryAfterSeconds] = reply;
+  if (allowed === 1) {
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+  return { allowed: false, retryAfterSeconds };
+}
+
+/** Logged by both the middleware and service-side callers when a limiter denies. */
+export function logRateLimited(name: string, degraded: boolean, deps?: RateLimitDeps): void {
+  const resolved = deps ?? defaultDeps();
+  resolved.logger.warn("rate_limited", { limiter: name, degraded });
+  resolved.logger.metric("rate_limited", 1, "Count", { limiter: name });
+}
+
+/**
+ * Route-level limiter (CLAUDE.md -> Security rules). Runs before validation and hashing.
+ * The subject is never logged; callers hash PII subjects themselves.
+ */
+export function rateLimit(options: RateLimitOptions, deps?: RateLimitDeps): RequestHandler {
+  const resolved: RateLimitDeps = deps ?? defaultDeps();
 
   return (req, res, next) => {
     captureRoute(req, res);
-    const key = `rl:${options.name}:${options.subject(req)}`;
 
-    const degrade = (): void => {
-      if (options.degrade === "fail-open") {
-        logDegraded("fail-open");
-        next();
-        return;
-      }
-      logDegraded("fallback");
-      const decision = processLimiter.hit(
-        key,
-        fallbackLimit(options.limit, resolved.fallbackDivisor),
-        options.windowMs,
-        resolved.now(),
-      );
-      if (decision.allowed) {
-        next();
-        return;
-      }
-      deny(res, next, decision.retryAfterSeconds, true);
-    };
-
-    if (!isRedisReady(resolved.redis)) {
-      degrade();
-      return;
-    }
-
-    callScript(resolved.redis, key, options.limit, options.windowMs).then(
-      ([allowed, retryAfterSeconds]) => {
-        if (allowed === 1) {
+    consumeRateLimit(options, options.subject(req), resolved).then(
+      (decision) => {
+        if (decision.allowed) {
           next();
           return;
         }
-        deny(res, next, retryAfterSeconds, false);
+        res.setHeader("Retry-After", String(Math.max(1, decision.retryAfterSeconds)));
+        logRateLimited(options.name, decision.degraded === true, resolved);
+        next(RateLimited);
       },
       () => {
-        degrade();
+        // consumeRateLimit never rejects; fail closed-shut of the limiter rather than the request.
+        next();
       },
     );
   };

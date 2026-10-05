@@ -3,10 +3,14 @@ import helmet from "helmet";
 import { env } from "./lib/config/env";
 import { errorHandler, notFoundHandler } from "./lib/error/errorHandler";
 import { cors } from "./lib/http/cors";
+import { noStore } from "./lib/http/no-store";
+import { rejectOptions } from "./lib/http/reject-options";
 import { inflightTracker } from "./lib/lifecycle/inflight";
 import { logger } from "./lib/logger/logger";
 import { requestLogger } from "./lib/logger/request-logger";
+import { assertRoutesAuthorized } from "./lib/rbac/assert-routes-authorized";
 import { requestId } from "./lib/request-id/request-id";
+import { buildWellKnownRouter } from "./app/auth/routes";
 import { buildPublicRouter } from "./routes";
 import type { AppOptions } from "./types";
 
@@ -24,6 +28,10 @@ export function createApp(options?: AppOptions): Express {
   app.use(requestLogger());
   app.use(helmet({ hsts: env.NODE_ENV === "production" }));
 
+  // Every /api/auth response is non-cacheable, including malformed-JSON 400s and OPTIONS answers (404 envelope
+  // or the development CORS preflight 204), so this precedes cors, rejectOptions and express.json.
+  app.use("/api/auth", noStore());
+
   if (env.CORS_ORIGINS.length > 0) {
     if (env.NODE_ENV === "production") {
       // Production is a single origin with CORS disabled (hub ADR 0005).
@@ -33,12 +41,23 @@ export function createApp(options?: AppOptions): Express {
     }
   }
 
+  app.use(rejectOptions());
   app.use(express.json({ limit: JSON_BODY_LIMIT, strict: true, type: "application/json" }));
 
-  app.use("/api", buildPublicRouter(options?.scope));
+  // JWKS lives outside /api (contract `getJwks`) and outside the /api/auth no-store rule.
+  const wellKnownRouter = buildWellKnownRouter(options?.scope);
+  app.use("/.well-known", wellKnownRouter);
+
+  const publicRouter = buildPublicRouter(options?.scope);
+  app.use("/api", publicRouter);
   if (options?.extraApiRouter) {
     app.use("/api", options.extraApiRouter);
   }
+
+  // Fail closed at boot: a route without authorize(...) throws here, in every environment (BR-27).
+  // Test-only extra routers are deliberately not checked.
+  assertRoutesAuthorized(publicRouter, "/api");
+  assertRoutesAuthorized(wellKnownRouter, "/.well-known");
 
   app.use(notFoundHandler);
   app.use(errorHandler);

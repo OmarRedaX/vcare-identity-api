@@ -3,7 +3,7 @@ title: Identity Service — Docs Index
 owner: identity-team
 service: identity-service
 status: draft
-last_verified: 2026-09-15
+last_verified: 2026-10-05
 tags: [index, router, identity]
 related: [service-card, system-design, runbook, quickstart]
 ---
@@ -14,9 +14,14 @@ related: [service-card, system-design, runbook, quickstart]
 is the Diátaxis type — a label over the docs, not a folder tree. Binding rules live in `CLAUDE.md`
 (cite sections by name, e.g. "CLAUDE.md → Security rules").
 
-> Status: design only — no application code exists yet. These docs are seeded from the PRD and
-> `CLAUDE.md`, refined by the 2026-09-15 `/system-design` baseline; `/update-docs` reconciles them with
-> as-built code. `CLAUDE.md` reflects the baseline; approved contract changes are pending — see
+> Status (2026-10-04): the `foundation` and `auth` modules are built — the skeleton, both listeners, health
+> probes, the cross-cutting `src/lib/` pieces, and the whole public auth surface (registration, login, refresh
+> rotation, logout, password flows, own profile, JWKS) plus the outbox worker and retention purges. `users`
+> (Epic A unit 2) and `/internal/*` (Epic B) are not built yet. The **auth and users contract changes are
+> applied** (C-1…C-14 of [auth/spec.md](./auth/spec.md) §14.2); the architecture shards are reconciled with
+> as-built auth code. Auth has unit and integration tests, a manual QA run and a code review whose findings are
+> resolved (see [auth/tasks.md](./auth/tasks.md)). These docs are seeded from the PRD and `CLAUDE.md` and refined by
+> the 2026-09-15 `/system-design` baseline — see
 > [architecture/design-baseline.md](./architecture/design-baseline.md).
 
 ## Service-level
@@ -24,7 +29,7 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 |---|---|---|
 | [service-card.md](./service-card.md) | 30-second summary (owner, data, dependencies, callers, endpoints) — synced to the hub | — |
 | [system-design.md](./system-design.md) | find the architecture shard for a concern (router) | explanation |
-| [quickstart.md](./quickstart.md) | run the service locally for the first time and walk the auth flow with curl | tutorial |
+| [quickstart.md](./quickstart.md) | run the service locally for the first time (deps, migrate, listeners, health, tests); the auth walkthrough is planned | tutorial |
 | [runbook.md](./runbook.md) | on-call: an alert fired, rotate a key or client secret, revoke sessions, create an admin, trace a request | how-to |
 
 ## Architecture (one doc = one job)
@@ -38,7 +43,7 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [architecture/api.md](./architecture/api.md) | look up an endpoint's roles, ownership, and error codes (human view of the contract) | reference |
 | [architecture/auth-tokens.md](./architecture/auth-tokens.md) | understand signing keys, access claims, refresh rotation, grace window, reuse detection, revocation | explanation |
 | [architecture/service-auth.md](./architecture/service-auth.md) | understand client credentials, scopes, the service guard, onboarding a new service client | explanation |
-| [architecture/infrastructure.md](./architecture/infrastructure.md) | look up env vars, logging/redaction, error envelope, health, shutdown, rate limits | reference |
+| [architecture/infrastructure.md](./architecture/infrastructure.md) | look up env vars (built vs planned), logging/redaction/metrics, error envelope, request id, health, shutdown, rate limits, idempotency, DB/Redis clients | reference |
 | [architecture/future.md](./architecture/future.md) | see what is deliberately deferred (events, MFA and admin provisioning, PII erasure, social login, email change, AI client) | explanation |
 
 ## Decisions (append-only)
@@ -58,6 +63,12 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [adr/0012-doctor-status-only-via-care.md](./adr/0012-doctor-status-only-via-care.md) | the admin status route refuses doctor targets | explanation |
 | [adr/0013-log-derived-metrics.md](./adr/0013-log-derived-metrics.md) | metrics come from structured logs and there is no tracing SDK | explanation |
 | [adr/0014-health-liveness-readiness-split.md](./adr/0014-health-liveness-readiness-split.md) | health is split into liveness and readiness | explanation |
+| [adr/0015-foundation-runtime-dependencies.md](./adr/0015-foundation-runtime-dependencies.md) | `reflect-metadata` was added and there is no `cors`, `uuid`, or `dotenv` package (in-house CORS, `crypto.randomUUID`, Node env files) | explanation |
+| [adr/0016-auth-runtime-dependencies.md](./adr/0016-auth-runtime-dependencies.md) | `jose`, `argon2` and `bcrypt` were added (bcrypt verify-only), and there is no cookie parser, Resend SDK, or HTTP client | explanation |
+| [adr/0017-password-reset-by-one-time-code.md](./adr/0017-password-reset-by-one-time-code.md) | password reset is a typed 6-digit code instead of an emailed link token, and what bounds its 20 bits of entropy | explanation |
+| [adr/0018-enumeration-timing-residual.md](./adr/0018-enumeration-timing-residual.md) | why known-versus-unknown email work in `register/start` and `forgot-password` is not equalised | explanation |
+| [adr/0019-refresh-versus-suspension-lock-order.md](./adr/0019-refresh-versus-suspension-lock-order.md) | the lock order the status-change code and refresh rotation must share, and why `rotate` is not changed yet | explanation |
+| [adr/0020-refresh-rotation-versus-revocation-lock-order.md](./adr/0020-refresh-rotation-versus-revocation-lock-order.md) | why refresh rotation versus family/user-wide revocation remains a residual until all paths share a lock order | explanation |
 
 ## Contract (source of truth — prose above derives from it)
 | Contract | Defines | Lens |
@@ -75,7 +86,15 @@ module doc when it is created.
 | Doc | Read it when you need to… | Lens |
 |---|---|---|
 | [foundation/brainstorm.md](./foundation/brainstorm.md) | see the agreed scope of the starter skeleton (what is in and out before any business module) | explanation |
-| [foundation/spec.md](./foundation/spec.md) | build or change the skeleton: file list and exported APIs, env subset, error handler, logger redaction, idempotency and rate-limit behaviour, health, shutdown, Docker, CI, test plan | reference |
+| [foundation/spec.md](./foundation/spec.md) | build or change the skeleton: file list and exported APIs, env subset, error handler, logger redaction, idempotency and rate-limit behaviour, health, shutdown, Docker, CI, test plan; as-built divergences in §15 | reference |
+| [foundation/tasks.md](./foundation/tasks.md) | see what was built for the skeleton, what is still open (hub sync, Knex log follow-up), and the test counts | reference |
+| [auth/brainstorm.md](./auth/brainstorm.md) | see the agreed scope of the auth module (registration, login, refresh sessions, passwords, own profile, JWKS, token/RBAC infrastructure, outbox worker and email) and its open questions | explanation |
+| [auth/spec.md](./auth/spec.md) | build or change the auth module: migrations for users/refresh_tokens/password_resets/registration_challenges/outbox_jobs, every auth + JWKS endpoint (guard, policy, limiters, idempotency, headers), refresh rotation algorithm, password reset by 6-digit code, `lib/auth`, `lib/rbac`, password hashing, outbox worker, email adapters, purges, env, test plan; ready (v1.1.0, no open questions); its contract edits C-1…C-14 are applied and the module is built | reference |
+| [users/brainstorm.md](./users/brainstorm.md) | see the agreed scope of admin user management (list/get users, patient status changes with history, session list/revoke) and its open questions | explanation |
+| [auth/tasks.md](./auth/tasks.md) | see Epic A's unit graph (auth then users, serial) and the auth build tasks and their status (build, tests and manual QA done; review findings resolved) | reference |
+| [users/tasks.md](./users/tasks.md) | see the users build tasks and their status (depends on auth) | reference |
+| [auth/manual-qa.md](./auth/manual-qa.md) | re-run or review the CURL checks of every `/api/auth/*` operation and the JWKS (enumeration safety, idempotency, refresh rotation/reuse/grace, rate limits, no-store, log PII scan) and see the open defects | how-to |
+| [foundation/manual-qa.md](./foundation/manual-qa.md) | re-run or review the CURL checks of health, request id, envelope, listener isolation, headers, CORS, and the readiness table with Redis/Postgres stopped | how-to |
 
 ---
 _Platform-scope questions (platform overview, deployment topology, capacity assumptions, who calls us, Care's

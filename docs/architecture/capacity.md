@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: accepted
 diataxis: explanation
-last_verified: 2026-09-15
+last_verified: 2026-10-04
 tags: [architecture, capacity, sizing, performance, storage]
 related: [system-design, design-baseline, deployment, data-model, adr-0003-argon2id-password-hashing, hub-capacity]
 ---
@@ -65,7 +65,7 @@ Peak rps = daily × 0.15 / 3600 × 2 (hub formula).
 |---|---|
 | Peak queries/s | ~100 (refresh ≈ 60, me ≈ 12, internal ≈ 9, rest small) |
 | Peak writes/s | ~30 (refresh rotation dominates) |
-| Connections | 2 API tasks × pool 10 + worker 5 + migration task 2 ≈ **27** |
+| Connections | 2 API tasks × (request pool 10 + probe pool 1) + worker (one pool, `DATABASE_POOL_MAX`, default 10) + migration task 2 ≈ **44** worst case |
 | Instance | 2 vCPU / 8 GB class, Multi-AZ synchronous standby |
 
 ### Storage

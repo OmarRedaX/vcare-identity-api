@@ -1,4 +1,4 @@
-import { db } from "../../src/lib/knex/knex";
+import { db, probeDb } from "../../src/lib/knex/knex";
 
 const BOOKKEEPING_TABLES = ["knex_migrations", "knex_migrations_lock"];
 
@@ -20,5 +20,5 @@ export async function truncateAll(): Promise<void> {
 }
 
 export async function closeDb(): Promise<void> {
-  await db.destroy();
+  await Promise.all([db.destroy(), probeDb.destroy()]);
 }

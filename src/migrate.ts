@@ -45,7 +45,7 @@ function make(name: string | undefined): number {
 }
 
 async function runCommand(command: string, args: readonly string[]): Promise<number> {
-  const conn = knex(migrationConfig(env.DATABASE_URL));
+  const conn = knex(migrationConfig(env.DATABASE_URL, logger));
   try {
     switch (command) {
       case "latest": {

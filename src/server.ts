@@ -3,11 +3,15 @@ import http from "node:http";
 import { createApp } from "./app";
 import { registerDependencies } from "./bootstrap";
 import { createInternalApp } from "./internal-app";
+import type { SigningKeySet } from "./lib/auth/types";
 import { env } from "./lib/config/env";
-import { db } from "./lib/knex/knex";
+import { EnvRequirementError, requireApiConfig } from "./lib/config/requirements";
+import { TOKENS } from "./lib/di/tokens";
+import { db, probeDb } from "./lib/knex/knex";
 import { lifecycle } from "./lib/lifecycle/lifecycle";
 import { logger } from "./lib/logger/logger";
 import { connectRedis, redis } from "./lib/redis/redis";
+import { withDeadline } from "./pkg/utils/promise";
 import type { RunningServer, ShutdownReason } from "./types";
 
 const KEEP_ALIVE_TIMEOUT_MS = 65_000;
@@ -38,7 +42,21 @@ function closeServer(server: http.Server): Promise<void> {
 }
 
 export async function startServer(): Promise<RunningServer> {
-  registerDependencies();
+  const scope = registerDependencies();
+
+  // The API's own environment set, checked before anything binds (spec §5.7).
+  try {
+    requireApiConfig(env);
+    // Resolved eagerly so a malformed JWT_PRIVATE_KEYS fails the boot, not the first login.
+    scope.resolve<SigningKeySet>(TOKENS.SigningKeys);
+  } catch (err) {
+    if (err instanceof EnvRequirementError) {
+      logger.error("invalid_environment", { keys: err.missingKeys });
+      process.exit(1);
+    }
+    throw err;
+  }
+
   connectRedis(redis, logger);
 
   const publicServer = http.createServer(createApp());
@@ -69,6 +87,7 @@ export async function startServer(): Promise<RunningServer> {
     lifecycle.markShuttingDown();
     logger.info("shutdown_started", { reason });
 
+    const startedAt = Date.now();
     let timer: NodeJS.Timeout | undefined;
     const drained = await Promise.race([
       Promise.all([closeServer(publicServer), closeServer(internalServer)]).then(() => true),
@@ -88,12 +107,15 @@ export async function startServer(): Promise<RunningServer> {
       internalServer.closeAllConnections();
     }
 
-    await db.destroy().catch(() => undefined);
-    try {
-      await redis.quit();
-    } catch {
-      redis.disconnect();
-    }
+    // Closing the pools is bounded by what is left of the shutdown budget: a hung connection (blackholed
+    // primary) must not outlive the deadline and wait for SIGKILL.
+    const remainingMs = Math.max(500, env.SHUTDOWN_TIMEOUT_MS - (Date.now() - startedAt));
+    await withDeadline(
+      Promise.all([db.destroy(), probeDb.destroy()]).then(() => undefined),
+      remainingMs,
+    );
+    await withDeadline(redis.quit().then(() => undefined), remainingMs);
+    redis.disconnect();
 
     if (!drained) {
       return 1;
@@ -110,7 +132,7 @@ export async function startServer(): Promise<RunningServer> {
 }
 
 if (require.main === module) {
-  void startServer().then((server) => {
+  const boot = startServer().then((server) => {
     const exitAfterShutdown = (reason: ShutdownReason): void => {
       void server.shutdown(reason).then((code) => {
         process.exit(code);
@@ -131,5 +153,10 @@ if (require.main === module) {
       logger.error("unhandled_rejection", { err });
       exitAfterShutdown("unhandledRejection");
     });
+  });
+
+  boot.catch((err: unknown) => {
+    logger.error("boot_failed", { err });
+    process.exit(1);
   });
 }

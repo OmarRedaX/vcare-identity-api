@@ -15,7 +15,7 @@ tokens for service-to-service auth.
 > `jose`, argon2id behind a bounded semaphore, deny-by-default `authorize`, plus the outbox worker (email via
 > Resend or a local capture adapter) and retention purges. Five migrations: `users`, `refresh_tokens`,
 > `password_resets`, `registration_challenges`, `outbox_jobs`.
-> `npm test`: 48 suites / 442 tests pass (2026-09-26).
+> `npm test`: 51 suites / 491 tests pass (2026-10-05).
 >
 > **Open:** the `users` module (admin user management, status changes) and all of `/internal/*` (service
 > tokens, batch lookup — Epic B) are not built. The foundation review

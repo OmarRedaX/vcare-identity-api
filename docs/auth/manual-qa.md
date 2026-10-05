@@ -5,7 +5,7 @@ service: identity-service
 module: auth
 status: current
 diataxis: how-to
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 tags: [manual-qa, curl, auth, registration, login, refresh-token, jwks, password, rate-limit]
 related: [auth-spec, auth-tasks, foundation-manual-qa, adr-0005-refresh-reuse-grace-window, adr-0006-email-first-registration-otp, adr-0007-transactional-outbox-worker]
 ---
@@ -165,4 +165,4 @@ Three defects are open. They are not fixed here (QA only).
 | Unique-violation race on the same email without a SQL fixture | A true race needs two simultaneous completes for different codes; approximated by the fixture insert (check 040). |
 
 ## Fix status (2026-10-04, fix-review)
-D-1 (fixed-offset timezone), D-2 (malformed JSON 400 without `no-store`) and D-3 (OPTIONS without `no-store`) are fixed in code and covered by unit and integration tests (see review `review-20261004-2113.md`). OPTIONS on `/api/auth/*` stays a `404` envelope (development CORS preflight stays `204`), both now with `Cache-Control: no-store`. `scripts/curl-test-auth.sh` was re-run end to end on a fresh stack on 2026-10-04: **256 pass / 0 fail** (checks 149, 203-205 cover D-1 to D-3). K3 is closed.
+D-1 (fixed-offset timezone), D-2 (malformed JSON 400 without `no-store`) and D-3 (OPTIONS without `no-store`) are fixed in code and covered by unit and integration tests. OPTIONS on `/api/auth/*` stays a `404` envelope (development CORS preflight stays `204`), both now with `Cache-Control: no-store`. `scripts/curl-test-auth.sh` was re-run end to end on a fresh stack on 2026-10-04: **256 pass / 0 fail** (checks 149, 203-205 cover D-1 to D-3). K3 is closed.

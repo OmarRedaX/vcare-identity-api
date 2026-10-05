@@ -94,7 +94,6 @@ module doc when it is created.
 | [auth/tasks.md](./auth/tasks.md) | see Epic A's unit graph (auth then users, serial) and the auth build tasks and their status (build, tests and manual QA done; review findings resolved) | reference |
 | [users/tasks.md](./users/tasks.md) | see the users build tasks and their status (depends on auth) | reference |
 | [auth/manual-qa.md](./auth/manual-qa.md) | re-run or review the CURL checks of every `/api/auth/*` operation and the JWKS (enumeration safety, idempotency, refresh rotation/reuse/grace, rate limits, no-store, log PII scan) and see the open defects | how-to |
-| [auth/reviews/review-20261004-2113.md](./auth/reviews/review-20261004-2113.md) | review the 19 auth findings, their verified dispositions, and the accepted ADR 0020 residual | reference |
 | [foundation/manual-qa.md](./foundation/manual-qa.md) | re-run or review the CURL checks of health, request id, envelope, listener isolation, headers, CORS, and the readiness table with Redis/Postgres stopped | how-to |
 
 ---

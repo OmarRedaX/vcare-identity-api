@@ -10,6 +10,7 @@ import {
   bcryptHash,
   expireRefreshToken,
   cookieFor,
+  hashPassword,
   mutableClock,
   refreshCookieHeader,
   refreshTokenFrom,
@@ -59,6 +60,20 @@ async function login(
     void agent.set(name, value);
   }
   return agent.send({ email, password });
+}
+
+/** Resolves once some backend waits on a row lock, i.e. login has verified the password and reached its lock. */
+async function waitForBlockedLock(): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const blocked = await db.raw<{ rows: unknown[] }>(
+      "SELECT 1 FROM pg_locks WHERE NOT granted AND locktype IN ('transactionid', 'tuple') LIMIT 1",
+    );
+    if (blocked.rows.length > 0) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("login never blocked on the user row lock");
 }
 
 function refreshWith(token: string): Promise<request.Response> {
@@ -254,6 +269,43 @@ describe("POST /api/auth/login", () => {
     expect(denied.status).toBe(429);
     expectErrorEnvelope(denied.body, "RateLimited");
     expect(Number(denied.headers["retry-after"])).toBeGreaterThanOrEqual(1);
+  });
+
+  it("should refuse the login and leave no session when a password reset commits after the password was verified", async () => {
+    const user = await seedUser({ email: "race.patient@example.test" });
+    const newHash = await hashPassword("Synthetic-New-Passw0rd");
+
+    // Plays the part of a reset: holds the row lock, so login verifies the old hash and then waits for it.
+    const reset = await db.transaction();
+    await reset("users").where("id", user.id).forUpdate().first();
+    const pending = login(user.email).then((response) => response);
+    await waitForBlockedLock();
+    await reset("users").where("id", user.id).update({ password_hash: newHash });
+    await reset.commit();
+
+    const response = await pending;
+
+    expect(response.status).toBe(401);
+    expectErrorEnvelope(response.body, "InvalidCredentials");
+    expect(refreshCookieHeader(response)).toBeUndefined();
+    expect(await tokenRows()).toHaveLength(0);
+  });
+
+  it("should refuse the login when the account is suspended after the password was verified", async () => {
+    const user = await seedUser({ email: "race.suspended@example.test" });
+
+    const suspend = await db.transaction();
+    await suspend("users").where("id", user.id).forUpdate().first();
+    const pending = login(user.email).then((response) => response);
+    await waitForBlockedLock();
+    await suspend("users").where("id", user.id).update({ status: "suspended" });
+    await suspend.commit();
+
+    const response = await pending;
+
+    expect(response.status).toBe(403);
+    expectErrorEnvelope(response.body, "AccountSuspended");
+    expect(await tokenRows()).toHaveLength(0);
   });
 });
 

@@ -69,6 +69,22 @@ export async function findLiveById(id: number, conn: Knex = db): Promise<User | 
   return row === undefined ? undefined : toEntity(row);
 }
 
+/**
+ * Login's session insert: locks the row so a concurrent password reset or suspension either finishes first
+ * (the caller then sees the new hash or status) or waits until the new session exists and revokes it.
+ * Index: primary key.
+ */
+export async function findLiveByIdForUpdate(id: number, conn: Knex): Promise<User | undefined> {
+  const row = await conn(TABLE)
+    .select([...USER_COLUMNS])
+    .where("id", id)
+    .whereNull("deleted_at")
+    .forUpdate()
+    .first<UserRow | undefined>();
+
+  return row === undefined ? undefined : toEntity(row);
+}
+
 /** `email_verified_at` is set here: ownership was proven before the account existed (ADR 0006). */
 export async function insertUser(row: NewUserRow, conn: Knex = db): Promise<User> {
   const inserted = await conn(TABLE)

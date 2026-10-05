@@ -14,6 +14,7 @@ import type { RateLimitDeps, SlidingWindowOptions } from "../../../lib/rate-limi
 import type { Clock } from "../../../lib/time/types";
 import { AccountSuspended } from "../../../lib/error/errors";
 import type { RefreshToken } from "../entity/refresh-token.entity";
+import type { User } from "../entity/user.entity";
 import { RevokedReason } from "../enums";
 import { InvalidCredentials } from "../errors";
 import * as refreshTokens from "../repository/refresh-token.repo";
@@ -96,7 +97,20 @@ export class SessionService {
     const refreshToken = randomToken();
     const trx = await this.db.transaction();
     let accessToken: string;
+    let account: User;
     try {
+      // The password was verified before this transaction: re-read under a row lock so a reset or
+      // suspension that committed in between cannot be followed by a live session (BR-7, rule 7).
+      const locked = await users.findLiveByIdForUpdate(user.id, trx);
+      if (locked === undefined || locked.passwordHash !== user.passwordHash) {
+        this.logger.warn("login_failed", { userId: user.id, reason: "credentials_changed" });
+        throw InvalidCredentials;
+      }
+      if (locked.isSuspended()) {
+        this.logger.warn("login_refused_suspended", { userId: user.id });
+        throw AccountSuspended;
+      }
+      account = locked;
       if (rehashed !== undefined) {
         await users.updatePasswordHash(user.id, rehashed, trx);
         this.logger.info("password_rehashed", { userId: user.id });
@@ -111,7 +125,7 @@ export class SessionService {
         },
         trx,
       );
-      accessToken = await this.signer.signUserToken(user);
+      accessToken = await this.signer.signUserToken(locked);
       await trx.commit();
     } catch (err) {
       await trx.rollback().catch(() => undefined);
@@ -119,7 +133,7 @@ export class SessionService {
     }
 
     this.logger.info("login_succeeded", { userId: user.id });
-    return { user, accessToken, refreshToken };
+    return { user: account, accessToken, refreshToken };
   }
 
   /** The decision table of spec §4.4; the controller maps each outcome to a status and cookie action. */

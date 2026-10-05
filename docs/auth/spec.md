@@ -6,7 +6,7 @@ module: auth
 status: ready
 version: 1.1.0
 diataxis: reference
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 tags: [spec, auth, registration, login, refresh-token, jwks, rbac, password, outbox, email, worker]
 related: [auth-brainstorm, auth-tasks, users-brainstorm, foundation-spec, auth-tokens, data-model, infrastructure, design-baseline, overview, adr-0002-asymmetric-jwt-rotating-refresh, adr-0003-argon2id-password-hashing, adr-0004-rejected-doctors-can-sign-in, adr-0005-refresh-reuse-grace-window, adr-0006-email-first-registration-otp, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0010-manual-admin-provisioning-role-policies, adr-0011-pii-retained-on-soft-delete, adr-0015-foundation-runtime-dependencies]
 contracts: [contracts/openapi.yaml]
@@ -523,8 +523,9 @@ Injected: `Db`, `Logger`, `Clock`, `PasswordHasher`, `TokenSigner`, `Env`, `Outb
   4. `user.status === "suspended"` → `AccountSuspended`; log `login_refused_suspended { userId }`. (Checked only
      after the password is verified, so status is never revealed without the password.)
   5. `needsRehash` → `newHash = hasher.hash(password)`; a full hash queue skips the rehash (`password_rehash_skipped`), never failing the login.
-  6. tx: optional `updatePasswordHash`; `refreshToken = randomToken()`; `insertToken({ userId, familyId: randomUuid(), tokenHash: sha256Hex(refreshToken), expiresAt: addTime(now, 30, "d"), deviceInfo })`;
-     `accessToken = signer.signUserToken(user)`; commit. Log `login_succeeded { userId }`.
+  6. tx: re-read the live user by id with `findLiveByIdForUpdate` (`SELECT … FOR UPDATE`) before inserting a refresh token. If the row is gone (soft-deleted) or its password hash differs from the verified hash, roll back and return `401 InvalidCredentials`; if it is now suspended, roll back and return `403 AccountSuspended`. A concurrent password reset or suspension that commits first is therefore observed before a new session is created.
+  7. With the row locked: optional `updatePasswordHash`; `refreshToken = randomToken()`; `insertToken({ userId, familyId: randomUuid(), tokenHash: sha256Hex(refreshToken), expiresAt: addTime(now, 30, "d"), deviceInfo })`;
+     `accessToken = signer.signUserToken(lockedUser)`; commit. Log `login_succeeded { userId }`.
   - `deviceInfo` = `User-Agent` with control characters removed, truncated to 255 characters, `null` if absent.
 - `refresh(presentedToken, rateLimiter)` → `RefreshOutcome` (algorithm in 4.4).
 - `logout(presentedToken | undefined)`: if the cookie value matches `^[A-Za-z0-9_-]{43}$`: `token = findByTokenHash(sha256Hex)`;
@@ -606,15 +607,14 @@ export type Role = "patient" | "doctor" | "admin";
 export type AccountStatus = "pending" | "active" | "suspended" | "rejected";
 export type Policy =
   | { kind: "public"; owner: "none" }                                     // no principal
-  | { kind: "refresh-cookie"; roles: readonly Role[]; owner: "refresh-family" } // principal = the cookie's token row, resolved in SessionService
+  | { kind: "refresh-cookie"; owner: "refresh-family" } // principal = the cookie's token row, resolved in SessionService
   | { kind: "user"; roles: readonly Role[]; owner: "self" | "none"; allowedStatuses: readonly AccountStatus[] };
 // Epic B adds { kind: "service"; scope: string; owner: "none" }.
 ```
 `src/lib/rbac/authorize.ts` — `authorize(policy: Policy | undefined): RequestHandler`:
 - `policy` undefined → throws at router construction (`route_without_policy`), so the process never starts.
-- `public` and `refresh-cookie` → `next()` (no bearer principal is required; `refresh-cookie` ownership and roles are
-  enforced by `SessionService`, which only acts on the family of the presented token and checks the owner's role
-  against `policy.roles`).
+- `public` and `refresh-cookie` → `next()` (no bearer principal is required). `refresh-cookie` has no roles;
+  `SessionService` resolves the presented token and acts only on its own family.
 - `user`: `req.auth?.kind !== "user"` → `Unauthorized`; role not in `roles` → `Forbidden`; `status` claim not in
   `allowedStatuses` → `AccountSuspended` when `suspended`, else `Forbidden`. Ownership `self`: the route has no id
   parameter — the service acts only on `req.auth.userId`, so the predicate is satisfied by construction and a
@@ -777,7 +777,7 @@ Inputs: cookie value `t` (may be absent), `now = clock.now()`, `grace = REFRESH_
    b. `user = findLiveById(row.userId, trx)`; none → rollback → **invalid**.
    c. `user.status === "suspended"` → `revokeFamily(row.familyId, "status_changed", trx)`, commit → **suspended**:
       403 `AccountSuspended`, clear cookie; log `refresh_refused_suspended { userId }`.
-   d. `user.role` not in `refreshFamilyPolicy.roles` → rollback → **invalid** (unreachable under `chk_users_role`).
+   d. No role check applies: `refreshFamilyPolicy` has no `roles`; the contract declares `x-roles: [public]`.
    e. `next = randomToken()`; `newId = insertToken({ userId, familyId: row.familyId, tokenHash: sha256Hex(next), expiresAt: addTime(now, 30, "d"), deviceInfo: row.deviceInfo })`;
       `markRotated(row.id, newId)` (0 rows → throw, rollback, 500); `accessToken = signer.signUserToken(user)`
       (signed **before** commit so a signing failure cannot strand a rotated family); commit.
@@ -1191,7 +1191,7 @@ and `Authorization`; `helmet` defaults (foundation). No files are uploaded or do
 ## 10. Performance
 | Path | Work | Queries | Budget (p95) |
 |---|---|---|---|
-| `POST /login` | 2 Redis limiter calls, 1 read (`uq_users_email`), 1 argon2 verify, 1 tx (insert token [+ rehash update]), 1 EdDSA sign | 2–3 + BEGIN/COMMIT | < 250 ms |
+| `POST /login` | 2 Redis limiter calls, 1 read (`uq_users_email`), 1 argon2 verify, 1 tx (lock user PK, insert token [+ rehash update]), 1 EdDSA sign | 3–4 + BEGIN/COMMIT | < 250 ms |
 | `POST /refresh` | 1 read (`uq_refresh_tokens_token_hash`), 1 Redis call, 1 tx (lock PK, user PK, insert, update), 1 EdDSA sign | 5 + BEGIN/COMMIT | < 50 ms |
 | `GET /.well-known/jwks.json` | memory only | 0 | < 10 ms |
 | `POST /register/start` | 2 Redis, 1 tx (read + 2–3 writes) | 3–4 | < 200 ms |
@@ -1277,6 +1277,8 @@ calling `OutboxProcessor.tick` and `PurgeService.runAll` in-process against the 
 - should return the same 401 InvalidCredentials body for an unknown email and a wrong password
 - should return 403 AccountSuspended when the password is right and the account is suspended
 - should return 401 InvalidCredentials (not 403) when the account is suspended and the password is wrong
+- should return 401 InvalidCredentials with no new session when a password reset changes the hash after verification or the account is soft-deleted before the locked re-read
+- should return 403 AccountSuspended with no new session when suspension commits after password verification
 - should log in and refresh when the account is rejected, and the token carries status rejected
 - should log in when the account is pending
 - should ignore an Idempotency-Key on login: two identical logins with the same key both return 200 with different cookies and create two families, and no `idem:*` key exists for the login route afterwards

@@ -24,6 +24,7 @@ jest.mock("../../../../src/app/auth/repository/refresh-token.repo", () => ({
 jest.mock("../../../../src/app/auth/repository/user.repo", () => ({
   findLiveByEmail: jest.fn(),
   findLiveById: jest.fn(),
+  findLiveByIdForUpdate: jest.fn(),
   updatePasswordHash: jest.fn(),
 }));
 jest.mock("../../../../src/lib/rate-limit/rate-limit", () => ({
@@ -141,6 +142,8 @@ beforeEach(() => {
   tokens.revokeFamily.mockResolvedValue(1);
   tokens.revokeAllForUser.mockResolvedValue(2);
   users.updatePasswordHash.mockResolvedValue(1);
+  // The locked re-read sees the same account the first read returned unless a test says it changed.
+  users.findLiveByIdForUpdate.mockImplementation(async () => (await users.findLiveByEmail(EMAIL)) as User | undefined);
 });
 
 describe("SessionService.login", () => {
@@ -211,6 +214,42 @@ describe("SessionService.login", () => {
     await expect(
       service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined }),
     ).rejects.toMatchObject({ code: "InvalidCredentials" });
+  });
+
+  it("should answer InvalidCredentials and insert no session when the password hash changed after the verify", async () => {
+    users.findLiveByEmail.mockResolvedValue(user());
+    users.findLiveByIdForUpdate.mockResolvedValue(user({ passwordHash: "$argon2id$v=19$m=19456,t=2,p=1$bmV3c2FsdA$bmV3" }));
+
+    await expect(
+      service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined }),
+    ).rejects.toMatchObject({ code: "InvalidCredentials", status: 401 });
+
+    expect(tokens.insertToken).not.toHaveBeenCalled();
+    expect(trx.rollback).toHaveBeenCalled();
+    expect(trx.commit).not.toHaveBeenCalled();
+  });
+
+  it("should answer InvalidCredentials and insert no session when the account was soft-deleted after the verify", async () => {
+    users.findLiveByEmail.mockResolvedValue(user());
+    users.findLiveByIdForUpdate.mockResolvedValue(undefined);
+
+    await expect(
+      service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined }),
+    ).rejects.toMatchObject({ code: "InvalidCredentials" });
+
+    expect(tokens.insertToken).not.toHaveBeenCalled();
+  });
+
+  it("should answer AccountSuspended and insert no session when the account was suspended after the verify", async () => {
+    users.findLiveByEmail.mockResolvedValue(user());
+    users.findLiveByIdForUpdate.mockResolvedValue(user({ status: "suspended" }));
+
+    await expect(
+      service.login({ email: EMAIL, password: PASSWORD, userAgent: undefined }),
+    ).rejects.toMatchObject({ code: "AccountSuspended", status: 403 });
+
+    expect(tokens.insertToken).not.toHaveBeenCalled();
+    expect(trx.rollback).toHaveBeenCalled();
   });
 
   it("should log in a pending or rejected account when the credentials are valid", async () => {

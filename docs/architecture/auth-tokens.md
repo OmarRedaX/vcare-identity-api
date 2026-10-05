@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: explanation
-last_verified: 2026-09-15
+last_verified: 2026-10-05
 tags: [architecture, auth, jwt, jwks, refresh-token, sessions, security]
-related: [system-design, service-auth, data-model, runbook, adr-0002-asymmetric-jwt-rotating-refresh, adr-0003-argon2id-password-hashing, adr-0004-rejected-doctors-can-sign-in, adr-0005-refresh-reuse-grace-window, adr-0006-email-first-registration-otp]
+related: [system-design, service-auth, data-model, runbook, adr-0002-asymmetric-jwt-rotating-refresh, adr-0003-argon2id-password-hashing, adr-0004-rejected-doctors-can-sign-in, adr-0005-refresh-reuse-grace-window, adr-0006-email-first-registration-otp, adr-0019-refresh-versus-suspension-lock-order, adr-0020-refresh-rotation-versus-revocation-lock-order]
 ---
 
 # User Tokens and Sessions
@@ -113,6 +113,8 @@ sequenceDiagram
 - The new refresh token's `expires_at` is issue time + 30 days (sliding session); rate limit 30/min per family.
 - Budget: p95 < 50 ms (one indexed lookup, one PK read, one short transaction, one EdDSA sign).
 
+The present rotation lock order leaves the suspension residual in [ADR 0019](../adr/0019-refresh-versus-suspension-lock-order.md) and the family/user-wide revocation residual in [ADR 0020](../adr/0020-refresh-rotation-versus-revocation-lock-order.md).
+
 ## 4. Revocation paths
 
 | Trigger | What is revoked | `revoked_reason` | Same transaction as |
@@ -134,7 +136,8 @@ Revocation is `UPDATE refresh_tokens SET revoked_at = now(), revoked_reason = $r
 Access tokens are verified locally and are not revocable. After any revocation above, an access token
 already issued stays valid until its `exp` — **at most 15 minutes**. This is accepted
 ([ADR 0002](../adr/0002-asymmetric-jwt-rotating-refresh.md)) because:
-- the refresh token is dead immediately, so the session cannot be extended;
+- ordinarily the refresh token is dead immediately, so the session cannot be extended; the concurrent rotation
+  exception and its potentially longer exposure are recorded in [ADR 0020](../adr/0020-refresh-rotation-versus-revocation-lock-order.md);
 - Care additionally blocks suspended doctors **locally at once** when it decides the suspension (Case 3);
 - the alternative (per-request introspection) makes Identity a synchronous dependency of every Care
   request, which PRD §4.4 rules out.

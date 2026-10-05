@@ -3,7 +3,7 @@ title: Identity Service — Docs Index
 owner: identity-team
 service: identity-service
 status: draft
-last_verified: 2026-10-04
+last_verified: 2026-10-05
 tags: [index, router, identity]
 related: [service-card, system-design, runbook, quickstart]
 ---
@@ -68,6 +68,7 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [adr/0017-password-reset-by-one-time-code.md](./adr/0017-password-reset-by-one-time-code.md) | password reset is a typed 6-digit code instead of an emailed link token, and what bounds its 20 bits of entropy | explanation |
 | [adr/0018-enumeration-timing-residual.md](./adr/0018-enumeration-timing-residual.md) | why known-versus-unknown email work in `register/start` and `forgot-password` is not equalised | explanation |
 | [adr/0019-refresh-versus-suspension-lock-order.md](./adr/0019-refresh-versus-suspension-lock-order.md) | the lock order the status-change code and refresh rotation must share, and why `rotate` is not changed yet | explanation |
+| [adr/0020-refresh-rotation-versus-revocation-lock-order.md](./adr/0020-refresh-rotation-versus-revocation-lock-order.md) | why refresh rotation versus family/user-wide revocation remains a residual until all paths share a lock order | explanation |
 
 ## Contract (source of truth — prose above derives from it)
 | Contract | Defines | Lens |
@@ -93,6 +94,7 @@ module doc when it is created.
 | [auth/tasks.md](./auth/tasks.md) | see Epic A's unit graph (auth then users, serial) and the auth build tasks and their status (build, tests and manual QA done; review findings resolved) | reference |
 | [users/tasks.md](./users/tasks.md) | see the users build tasks and their status (depends on auth) | reference |
 | [auth/manual-qa.md](./auth/manual-qa.md) | re-run or review the CURL checks of every `/api/auth/*` operation and the JWKS (enumeration safety, idempotency, refresh rotation/reuse/grace, rate limits, no-store, log PII scan) and see the open defects | how-to |
+| [auth/reviews/review-20261004-2113.md](./auth/reviews/review-20261004-2113.md) | review the 19 auth findings, their verified dispositions, and the accepted ADR 0020 residual | reference |
 | [foundation/manual-qa.md](./foundation/manual-qa.md) | re-run or review the CURL checks of health, request id, envelope, listener isolation, headers, CORS, and the readiness table with Redis/Postgres stopped | how-to |
 
 ---

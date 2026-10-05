@@ -8,7 +8,7 @@ version: 1.1.0
 diataxis: reference
 last_verified: 2026-10-05
 tags: [spec, auth, registration, login, refresh-token, jwks, rbac, password, outbox, email, worker]
-related: [auth-brainstorm, auth-tasks, users-brainstorm, foundation-spec, auth-tokens, data-model, infrastructure, design-baseline, overview, adr-0002-asymmetric-jwt-rotating-refresh, adr-0003-argon2id-password-hashing, adr-0004-rejected-doctors-can-sign-in, adr-0005-refresh-reuse-grace-window, adr-0006-email-first-registration-otp, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0010-manual-admin-provisioning-role-policies, adr-0011-pii-retained-on-soft-delete, adr-0015-foundation-runtime-dependencies]
+related: [auth-brainstorm, auth-tasks, users-brainstorm, foundation-spec, auth-tokens, data-model, infrastructure, design-baseline, overview, adr-0002-asymmetric-jwt-rotating-refresh, adr-0003-argon2id-password-hashing, adr-0004-rejected-doctors-can-sign-in, adr-0005-refresh-reuse-grace-window, adr-0006-email-first-registration-otp, adr-0007-transactional-outbox-worker, adr-0008-redis-tier-2-fallback-limiter, adr-0010-manual-admin-provisioning-role-policies, adr-0011-pii-retained-on-soft-delete, adr-0015-foundation-runtime-dependencies, adr-0020-refresh-rotation-versus-revocation-lock-order]
 contracts: [contracts/openapi.yaml]
 ---
 
@@ -791,6 +791,8 @@ Inputs: cookie value `t` (may be absent), `now = clock.now()`, `grace = REFRESH_
 
 `pending` and `rejected` users refresh normally; the new token carries the live `role`, `status`, and `ev`.
 Query count on success: 1 lookup + 3 statements in the tx (lock, user read, insert) + 1 update = 5, plus 1 Redis call.
+
+The present token-first lock order leaves the refresh-versus-revocation residual accepted in [ADR 0020](../adr/0020-refresh-rotation-versus-revocation-lock-order.md), alongside the suspension case in [ADR 0019](../adr/0019-refresh-versus-suspension-lock-order.md).
 
 ### 4.5 Cookie helpers (`src/lib/http/cookies.ts`)
 - `readCookie(req, name): string | undefined` — parses the `Cookie` header (split on `;`, first `=`, trim; no

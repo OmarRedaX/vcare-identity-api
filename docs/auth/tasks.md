@@ -106,7 +106,7 @@ needs a new or changed endpoint in care-service.
 - [x] K3 (manual-qa) ← `/manual-qa auth` (spec §12.3) — re-run 2026-10-04 after the fix-review: 256 pass / 0 fail; D-1 to D-3 verified fixed; see [manual-qa.md](./manual-qa.md)
 - [x] K4 (docs) `docs/service-card.md`, `docs/INDEX.md` rows, ADR index rows; remaining doc fixes (spec §12.2) → `/update-docs auth`
 
-- [x] L1 (fix-review) review 2026-10-04: 18 findings resolved or disputed with an ADR (0018, 0019), including the login and change-password race fixes verified 2026-10-05; D-1 to D-3 of manual QA fixed in code and tests and K3 closed.
+- [x] L1 (fix-review) review 2026-10-04: 19 findings resolved or accepted as residuals in ADRs 0018, 0019, and 0020; the refresh/revocation race in ADR 0020 remains for the users / internal-users lock-order work. Login and change-password race fixes were verified 2026-10-05; D-1 to D-3 of manual QA fixed in code and tests and K3 closed.
 
 **Counts:** 51 tasks - 51 done, 0 in progress, 0 todo.
 

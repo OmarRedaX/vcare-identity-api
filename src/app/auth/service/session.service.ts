@@ -19,7 +19,13 @@ import { RevokedReason } from "../enums";
 import { InvalidCredentials } from "../errors";
 import * as refreshTokens from "../repository/refresh-token.repo";
 import * as users from "../repository/user.repo";
-import type { LoginInput, LoginResult, RefreshOutcome } from "../types";
+import type {
+  LiveFamily,
+  LiveFamilyCursor,
+  LoginInput,
+  LoginResult,
+  RefreshOutcome,
+} from "../types";
 
 /** Subject is the token family, which is only known after the database lookup (spec §4.4 step 3). */
 const REFRESH_LIMITER: SlidingWindowOptions = {
@@ -161,7 +167,7 @@ export class SessionService {
       return { kind: "invalid" };
     }
 
-    return this.rotate(row.id, now);
+    return this.rotate(row, now);
   }
 
   /** Always safe to call: a missing, malformed, unknown or revoked cookie simply revokes nothing (BR-17). */
@@ -173,8 +179,22 @@ export class SessionService {
     if (row === undefined) {
       return;
     }
-    await refreshTokens.revokeFamily(row.familyId, RevokedReason.Logout);
-    this.logger.info("logout", { userId: row.userId });
+
+    // User row first, then the token rows (ADR 0020): a refresh racing this logout cannot leave a live
+    // successor behind in the revoked family.
+    const revoked = await this.revokeFamilyUserFirst(row.userId, row.familyId, RevokedReason.Logout);
+    if (revoked) {
+      this.logger.info("logout", { userId: row.userId });
+    }
+  }
+
+  /** One family's live sessions for the admin list (`users` module); the clock is injected for expiry. */
+  listLiveFamilies(
+    userId: number,
+    cursor: LiveFamilyCursor | undefined,
+    limit: number,
+  ): Promise<LiveFamily[]> {
+    return refreshTokens.listLiveFamilies(userId, this.clock.now(), cursor, limit);
   }
 
   /** Called by this module (reset), and by `users` / Epic B inside **their** transaction (spec §1.4). */
@@ -231,7 +251,9 @@ export class SessionService {
       }
     }
 
-    await refreshTokens.revokeFamily(token.familyId, RevokedReason.ReuseDetected);
+    // Revoked under the user lock (ADR 0020), so a concurrent rotation of the live successor cannot leave
+    // a refreshable token on a family declared compromised.
+    await this.revokeFamilyUserFirst(token.userId, token.familyId, RevokedReason.ReuseDetected);
     this.logger.warn("refresh_token_reuse_detected", {
       userId: token.userId,
       familyId: token.familyId,
@@ -240,28 +262,62 @@ export class SessionService {
     return { kind: "reused" };
   }
 
-  /** One transaction: lock the presented row, re-read the user, insert the successor, mark rotated. */
-  private async rotate(id: number, now: Date): Promise<RefreshOutcome> {
+  /**
+   * Lock order (ADR 0019 / 0020): the `users` row first, then that user's token rows. Returns `false` when the
+   * account no longer exists, so there is nothing to revoke.
+   */
+  private async revokeFamilyUserFirst(
+    userId: number,
+    familyId: string,
+    reason: RevokedReason,
+  ): Promise<boolean> {
+    const trx = await this.db.transaction();
+    try {
+      const locked = await users.findLiveByIdForUpdate(userId, trx);
+      if (locked === undefined) {
+        await trx.rollback();
+        return false;
+      }
+      await refreshTokens.revokeFamily(familyId, reason, trx);
+      await trx.commit();
+      return true;
+    } catch (err) {
+      await trx.rollback().catch(() => undefined);
+      throw err;
+    }
+  }
+
+  /**
+   * One transaction, locks in the global order (ADR 0019 / 0020): the user `FOR SHARE` (concurrent refreshes
+   * of one user coexist; every writer is excluded), then the presented token `FOR UPDATE`, then re-check the
+   * token and the user's status under both locks.
+   */
+  private async rotate(presented: RefreshToken, now: Date): Promise<RefreshOutcome> {
     const nextToken = randomToken();
     const trx = await this.db.transaction();
     try {
-      const locked = await refreshTokens.findByIdForUpdate(id, trx);
-      if (locked === undefined) {
-        await trx.rollback();
-        return { kind: "invalid" };
-      }
-      if (locked.revokedAt !== null) {
-        // A concurrent refresh won the race: re-judge outside the transaction (typically "grace").
-        await trx.rollback();
-        return this.judgeRevoked(locked, now);
-      }
-
-      const user = await users.findLiveById(locked.userId, trx);
+      const user = await users.findLiveByIdForShare(presented.userId, trx);
       if (user === undefined) {
         await trx.rollback();
         return { kind: "invalid" };
       }
 
+      const locked = await refreshTokens.findByIdForUpdate(presented.id, trx);
+      if (locked === undefined) {
+        await trx.rollback();
+        return { kind: "invalid" };
+      }
+      if (locked.revokedAt !== null) {
+        // A concurrent refresh or revocation won the race: re-judge outside the transaction.
+        await trx.rollback();
+        return this.judgeRevoked(locked, now);
+      }
+      if (isPast(locked.expiresAt, now)) {
+        await trx.rollback();
+        return { kind: "invalid" };
+      }
+
+      // The share lock keeps the user row unchanged, so this status is current.
       if (user.isSuspended()) {
         await refreshTokens.revokeFamily(locked.familyId, RevokedReason.StatusChanged, trx);
         await trx.commit();

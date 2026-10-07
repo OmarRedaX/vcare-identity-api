@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: how-to
-last_verified: 2026-10-04
+last_verified: 2026-10-07
 tags: [runbook, operations, on-call, identity]
 related: [service-card, auth-tokens, service-auth, infrastructure, deployment, foundation-manual-qa]
 ---
@@ -14,10 +14,10 @@ related: [service-card, auth-tokens, service-auth, infrastructure, deployment, f
 On-call guide. Task-oriented; assumes the service is deployed. Identity is **Tier 1**: an outage stops
 all logins and refreshes platform-wide, and blocks Care's Case 3 suspensions (Care retries and alerts).
 
-> Status (2026-09-16): the `foundation` module is built — health probes, graceful shutdown, structured logs,
-> and the Redis-down behaviour below are real. Auth, users, sessions, service-auth, and the outbox are not built
-> yet: their alerts and procedures are the contract for the observability and ops work done when those modules
-> land.
+> Status (2026-10-07): the `foundation`, `auth` and `users` modules are built — health probes, graceful shutdown,
+> structured logs, the Redis-down behaviour, the auth flows, the outbox worker, and the admin status/session
+> routes used below are real. Service-auth and internal-users are not built yet: their alerts and procedures are the
+> contract for the ops work done when those modules land.
 
 ## At a glance
 | | |

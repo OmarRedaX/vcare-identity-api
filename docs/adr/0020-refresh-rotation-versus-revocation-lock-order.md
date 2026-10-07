@@ -5,7 +5,7 @@ service: identity-service
 status: accepted
 date: 2026-10-05
 diataxis: explanation
-last_verified: 2026-10-05
+last_verified: 2026-10-07
 tags: [adr, decision, refresh-token, revocation, concurrency]
 related: [auth-spec, users-tasks, adr-0002-asymmetric-jwt-rotating-refresh, adr-0005-refresh-reuse-grace-window, adr-0019-refresh-versus-suspension-lock-order]
 ---
@@ -43,6 +43,17 @@ For the joint implementation, this uniform `FOR UPDATE` order refines ADR 0019's
 - Refresh is a hot path with a p95 < 50 ms budget. The natural status-change order is user -> tokens. Adding a
   token -> user lock to rotation now could deadlock against that order; the shared order must be implemented and
   measured with all callers together. No auth behaviour changes under this decision.
+
+## Implementation note (2026-10-07)
+
+The joint implementation shipped with the `users` module ([users/spec.md](../users/spec.md) D-6, section 3.8).
+`rotate` locks the user row `FOR SHARE` (`findLiveByIdForShare`) and then the presented token `FOR UPDATE`;
+the revokers (status change, admin session revoke, logout, reuse-detection revoke, reset and change-password)
+lock the user `FOR UPDATE` (or take the equivalent row write lock) first. `FOR SHARE` conflicts with every
+`FOR UPDATE`/`UPDATE` on the user, so rotation and revocation of one user are fully serialised, while concurrent
+refreshes of different devices of the same user still run in parallel. This is the refinement of the uniform
+`FOR UPDATE` wording above, consistent with ADR 0019. The residual described in Context is closed for these paths;
+the concurrency suite is `tests/integration/users/concurrency.test.ts`.
 
 ## Follow-up
 

@@ -60,6 +60,21 @@ export interface RegistrationChallengeRow {
   created_at: Date;
 }
 
+/** `users` list row: the cursor value is the microsecond-precision text of `created_at` (spec §3.7). */
+export interface UserListRow extends UserRow {
+  created_at_cursor: string;
+}
+
+/** One live refresh-token family joined to its earliest retained token (spec §3.7). */
+export interface LiveFamilyRow {
+  family_id: string;
+  device_info: string | null;
+  last_used_at: Date;
+  expires_at: Date;
+  first_created_at: Date;
+  first_created_at_cursor: string;
+}
+
 // ── insert shapes ──
 export interface NewUserRow {
   email: string;
@@ -167,4 +182,37 @@ export interface AccountStatusView {
 export interface EmailTemplate {
   subject: string;
   text: string;
+}
+
+// ── admin list shapes (used by the `users` module through `AccountService` / `SessionService`) ──
+export interface UserListFilter {
+  role?: Role;
+  status?: AccountStatus;
+  email?: string;
+}
+
+/** `createdAt` is the microsecond-precision ISO text carried by the cursor. */
+export interface UserListCursor {
+  createdAt: string;
+  id: number;
+}
+
+export interface UserListItem {
+  user: User;
+  createdAtCursor: string;
+}
+
+export interface LiveFamily {
+  familyId: string;
+  deviceInfo: string | null;
+  /** Earliest retained token of the family. */
+  createdAt: Date;
+  createdAtCursor: string;
+  lastUsedAt: Date;
+  expiresAt: Date;
+}
+
+export interface LiveFamilyCursor {
+  createdAt: string;
+  familyId: string;
 }

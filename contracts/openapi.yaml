@@ -488,6 +488,7 @@ paths:
           description: A page of users.
           headers:
             X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
           content:
             application/json:
               schema:
@@ -521,6 +522,7 @@ paths:
           description: The user.
           headers:
             X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
           content:
             application/json:
               schema:
@@ -568,6 +570,7 @@ paths:
           description: Status applied (or already in the requested status).
           headers:
             X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
           content:
             application/json:
               schema:
@@ -605,6 +608,7 @@ paths:
           description: A page of sessions.
           headers:
             X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControlNoStore' }
           content:
             application/json:
               schema:
@@ -1405,7 +1409,7 @@ components:
       properties:
         familyId: { type: string, format: uuid }
         deviceInfo: { type: [string, 'null'], maxLength: 255, description: Truncated User-Agent captured at login. }
-        createdAt: { type: string, format: date-time, description: When the family was created (login). }
+        createdAt: { type: string, format: date-time, description: 'Creation time of the earliest retained token of the family (expired token rows are purged, so for long-lived families this can be later than the login time).' }
         lastUsedAt: { type: string, format: date-time, description: When the family's current token was issued. }
         expiresAt: { type: string, format: date-time, description: Expiry of the family's current token. }
     AccessTokenResponse:

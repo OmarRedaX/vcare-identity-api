@@ -7,6 +7,8 @@ import { PasswordService } from "./app/auth/service/password.service";
 import { PurgeService } from "./app/auth/service/purge.service";
 import { RegistrationService } from "./app/auth/service/registration.service";
 import { SessionService } from "./app/auth/service/session.service";
+import { UsersController } from "./app/users/controller/users.controller";
+import { UsersService } from "./app/users/service/users.service";
 import { HealthController } from "./app/health/controller/health.controller";
 import { HealthService } from "./app/health/service/health.service";
 import { loadSigningKeys } from "./lib/auth/keys";
@@ -97,6 +99,8 @@ export function registerDependencies(overrides?: DependencyOverrides): Dependenc
   scope.registerSingleton(TOKENS.PurgeService, PurgeService);
   scope.registerSingleton(TOKENS.AuthController, AuthController);
   scope.registerSingleton(TOKENS.JwksController, JwksController);
+  scope.registerSingleton(TOKENS.UsersService, UsersService);
+  scope.registerSingleton(TOKENS.UsersController, UsersController);
 
   if (!hasOverrides) {
     rootRegistered = true;

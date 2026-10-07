@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: reference
-last_verified: 2026-09-15
+last_verified: 2026-10-07
 tags: [architecture, data-model, postgresql, schema, indexes]
 related: [system-design, overview, auth-tokens, service-auth, adr-0001-no-orm-knex-raw-sql, design-baseline, capacity, adr-0006-email-first-registration-otp, adr-0007-transactional-outbox-worker]
 ---
@@ -184,7 +184,8 @@ One row per issued refresh token. A **family** is the chain of rotations started
 | Index | Definition | Query it serves |
 |---|---|---|
 | `uq_refresh_tokens_token_hash` | `UNIQUE (token_hash)` | refresh/logout lookup `WHERE token_hash = $1` (includes revoked rows so reuse is detectable) |
-| `idx_refresh_tokens_user_id_live` | `(user_id, created_at DESC) WHERE revoked_at IS NULL` | revoke all families for a user (suspension, reset, admin `DELETE /sessions`) `UPDATE … WHERE user_id = $1 AND revoked_at IS NULL`; `GET /api/users/{id}/sessions` |
+| `idx_refresh_tokens_user_id_live` | `(user_id) WHERE revoked_at IS NULL` | `GET /api/users/{id}/sessions` (live tokens of one user); also the live-row part of revoke-all `UPDATE … WHERE user_id = $1 AND revoked_at IS NULL` (as built in `20261007000200`) |
+| `idx_refresh_tokens_family_id_created_at` | `(family_id, created_at, id)` | session `createdAt`: earliest retained token of a family, `ORDER BY created_at, id LIMIT 1` (`GET /api/users/{id}/sessions`) |
 | `idx_refresh_tokens_family_id_live` | `(family_id) WHERE revoked_at IS NULL` | revoke a family (logout, reuse detection) `UPDATE … WHERE family_id = $1 AND revoked_at IS NULL` |
 | `idx_refresh_tokens_replaced_by_id` | `(replaced_by_id) WHERE replaced_by_id IS NOT NULL` | covers `fk_refresh_tokens_replaced_by_id` |
 | `idx_refresh_tokens_expires_at` | `(expires_at)` | background purge of rows expired beyond retention `WHERE expires_at < $1` |

@@ -165,6 +165,18 @@ export const envSchema = z
         message: "must be set explicitly (>= 1) in production",
       });
     }
+    // The token route limits by client IP, so every Care task would share the load balancer's address
+    // without it (service-auth BR-23).
+    if (
+      value.NODE_ENV === "production" &&
+      (value.INTERNAL_TRUST_PROXY_HOPS === undefined || value.INTERNAL_TRUST_PROXY_HOPS < 1)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["INTERNAL_TRUST_PROXY_HOPS"],
+        message: "must be set explicitly (>= 1) in production",
+      });
+    }
     if (value.NODE_ENV === "production") {
       if (!value.REDIS_URL.startsWith("rediss://")) {
         ctx.addIssue({ code: "custom", path: ["REDIS_URL"], message: "must use rediss:// (TLS) in production" });

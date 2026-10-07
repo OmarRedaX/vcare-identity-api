@@ -754,11 +754,13 @@ paths:
       description: |
         OAuth 2.0 client-credentials grant. `client_secret` is verified against
         `service_clients.client_secret_hash` (argon2id); every requested scope must be in `allowed_scopes`
-        and the requested audience in `allowed_audiences`. Returns a 300-second JWT (`typ=service`,
-        `sub=<client_id>`, `aud=<audience>`, `scope`, `jti`). No refresh token — callers re-exchange before
-        expiry. Field names are snake_case (OAuth 2.0 wire format) inside the standard envelope.
+        and the requested audience in `allowed_audiences`; a scope or an audience outside the client's
+        allow-lists returns `403 InsufficientScope` (checked only after the secret verified). Returns a
+        300-second JWT (`typ=service`, `sub=<client_id>`, `aud=<audience>` as a single string, `scope`,
+        `jti`). No refresh token — callers re-exchange before expiry. Field names are snake_case
+        (OAuth 2.0 wire format) inside the standard envelope.
         Unknown client, wrong secret, and disabled client all return `401 InvalidCredentials`.
-        Rate limit: 60/min per client.
+        Rate limits: 30/min per client IP and 60/min per `client_id` (`429 RateLimited` with `Retry-After`).
       security: []
       x-roles: [service]
       x-ownership: none
@@ -1210,7 +1212,7 @@ components:
                 success: false
                 error: { code: AccountSuspended, message: Account is suspended, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
     InsufficientScope:
-      description: The service token (or requested scope) lacks the required scope.
+      description: The service token lacks the required scope, or the token request names a scope or an audience outside the client's allow-lists.
       headers:
         X-Request-Id: { $ref: '#/components/headers/XRequestId' }
       content:
@@ -1588,5 +1590,5 @@ components:
         grant_type: { type: string, const: client_credentials }
         client_id: { type: string, pattern: '^[a-z][a-z0-9-]{2,63}$', examples: [care-service] }
         client_secret: { type: string, format: password, minLength: 32, maxLength: 256 }
-        scope: { type: string, pattern: '^[a-z]+(:[a-z]+)+( [a-z]+(:[a-z]+)+)*$', examples: ['users:read users:status:write'] }
-        audience: { type: string, pattern: '^vcare-[a-z0-9-]+$', examples: [vcare-identity] }
+        scope: { type: string, maxLength: 256, pattern: '^[a-z]+(:[a-z]+)+( [a-z]+(:[a-z]+)+)*$', examples: ['users:read users:status:write'] }
+        audience: { type: string, maxLength: 64, pattern: '^vcare-[a-z0-9-]+$', examples: [vcare-identity] }

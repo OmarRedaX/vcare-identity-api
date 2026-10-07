@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 module: service-auth
 status: ready
-version: 1.1.0
+version: 1.1.1
 diataxis: reference
-last_verified: 2026-10-07
+last_verified: 2026-10-08
 tags: [spec, service-auth, client-credentials, service-guard, service-clients, internal-listener, rate-limit, provisioning]
 related: [service-auth-brainstorm, service-auth, data-model, api, auth-tokens, infrastructure, runbook, quickstart, auth-spec, users-spec, adr-0002-asymmetric-jwt-rotating-refresh, adr-0003-argon2id-password-hashing, adr-0008-redis-tier-2-fallback-limiter, adr-0010-manual-admin-provisioning-role-policies, adr-0012-doctor-status-only-via-care, adr-0014-health-liveness-readiness-split]
 contracts: [contracts/openapi.yaml]
@@ -45,7 +45,8 @@ route needs. The two guarded routes (`GET /internal/users`, `PATCH /internal/use
 - `service-guard` does **no I/O** (no DB, no Redis): it verifies a signature. The token endpoint does one indexed read
   and one argon2id verify.
 - Unknown client, wrong secret, disabled client, soft-deleted client: indistinguishable `401 InvalidCredentials`
-  (same body, same cost: one argon2id verify each).
+  (same body; one argon2id verify each, except a wrong secret on a client inside a rotation window, which costs two:
+  accepted residual, ADR 0022).
 - Fail closed: a route with no `authorize(...)` stops the process at boot on the internal listener too.
 
 ### 1.3 Dependencies
@@ -148,9 +149,9 @@ Enum-like, secret and array handling follow CLAUDE.md → Database rules (no nat
 
 ### 2.2 Repository (`service-client.repo.ts`)
 Exported functions taking `conn: Knex = db`, explicit `SERVICE_CLIENT_COLUMNS` (never `SELECT *`), private `toEntity`:
-- `findLiveByClientId(conn, clientId)` — the query above; the entity carries both hashes, so it is **never** passed to a
+- `findLiveByClientId(clientId, conn = db)` — the query above; the entity carries both hashes, so it is **never** passed to a
   DTO or a logger.
-- `touchLastUsed(conn, id, now)` —
+- `touchLastUsed(id, now, conn = db)` —
   `UPDATE service_clients SET last_used_at = $2 WHERE id = $1 AND deleted_at IS NULL AND (last_used_at IS NULL OR last_used_at < $2 - interval '1 minute')`.
   Primary-key update, no `updated_at` change (usage is not a modification).
 No insert/update/delete of clients exists in application code: provisioning is ops SQL (section 6).
@@ -231,7 +232,7 @@ No transaction (one read, no write on the request path).
    `iss=vcare-identity`, `sub=client_id`, `typ=service`, `aud=<audience>` (string), `scope=<granted, space-joined>`,
    `iat` (from `Clock`), `exp = iat + 300`, `jti=<random UUID>`. Same Ed25519 key set as user tokens, verifiable at
    `/.well-known/jwks.json`.
-8. After sending the response, `touchLastUsed(db, id, now)` fire-and-forget; a rejection is logged `warn`
+8. After sending the response, `touchLastUsed(id, now, db)` fire-and-forget; a rejection is logged `warn`
    (`service_client_touch_failed`) and swallowed.
 9. Log `service_token_issued` (info) with `clientId`, `audience`, `scope` (names only).
 
@@ -268,7 +269,7 @@ Already built (foundation); specified here so this module's tests assert them on
 ## 4. Business rules
 | # | Rule | Enforced by |
 |---|---|---|
-| BR-1 | Unknown, soft-deleted, disabled client, wrong secret and an expired previous secret all return the same `401 InvalidCredentials` (same body, one argon2id verify each, dummy verify when no real hash applies). | `ServiceAuthService` steps 3-4 |
+| BR-1 | Unknown, soft-deleted, disabled client, wrong secret and an expired previous secret all return the same `401 InvalidCredentials` (same body; one argon2id verify each, dummy verify when no real hash applies, except a wrong secret inside a rotation window which verifies current then previous: accepted timing residual, ADR 0022). | `ServiceAuthService` steps 3-4 |
 | BR-2 | `client_secret` is verified against `client_secret_hash`, or an unexpired `previous_secret_hash`; never compared with `===`, never logged. | `PasswordHasher`; step 4 |
 | BR-3 | Hash work is bounded: a full queue is `429 RateLimited`, never an unbounded wait. | `Semaphore` (`HASH_CONCURRENCY`, `HASH_QUEUE_MAX`) |
 | BR-4 | Scope/audience checks run only after the secret verified. | step order in 3.3 |
@@ -479,3 +480,32 @@ None. The human accepted every decision in this spec (2026-10-07), including the
   must cache the service token and re-exchange ~60 s before `exp`, honour `Retry-After` on the token route's `429`, and
   keep the client secret in its secret manager (rotated by the runbook's overlap procedure); and that the internal LB
   hop count (`INTERNAL_TRUST_PROXY_HOPS = 1`) is a deployment requirement because the token route limits by client IP.
+
+### 13.3 Status of 13.1 (2026-10-08)
+C-1 and C-2 are applied in `contracts/openapi.yaml` (`issueServiceToken` description, `ServiceTokenRequest.maxLength`).
+
+## 14. As-built notes (2026-10-08, v1.1.1)
+Reconciled with the code during `/update-docs`; the contract and the code agree, no contract change was needed.
+- **Required claims in the guard.** `verifyServiceAccessToken` requires `exp`, `iat`, `sub` and `jti` (jose
+  `requiredClaims`); a correctly signed token missing any of them is `401 ServiceTokenRequired` (reason `bad_claims`).
+  Section 3.4 step 3 describes the expiry check; this closes the "token without `exp` never expires" gap found in
+  review (2026-10-08).
+- **Rotation window timing and `secret_expired`.** Accepted residuals recorded in
+  [ADR 0022](../adr/0022-service-client-rotation-window-timing.md): a wrong secret inside an open window costs two
+  argon2id verifies (BR-1, section 1.2 already worded accordingly), and `secret_expired` is logged whenever the
+  current secret fails and the previous one is past expiry, so it is a hint only. Alert on `bad_secret` plus
+  `secret_expired` together.
+- **Expired previous pair is not auto-cleared.** The step in the original runbook text ("clear once confirmed") is
+  dropped: an expired `previous_secret_*` pair is ignored by the token endpoint and overwritten by the next
+  `--rotate`.
+- **Redaction.** `previousSecretHash` and `secretHash` were added to the logger's redacted keys (defence in depth).
+- **Repository signatures** are `findLiveByClientId(clientId, conn = db)` and `touchLastUsed(id, now, conn = db)` (`conn`
+  last), as in every other repository of this service; sections 2.2 and 3.3 already say so.
+- **Docs delivered (section 6.3):** runbook (provision, rotate with the `UPDATE n` check, `--leaked`, disable via
+  `is_active`, `429` storm), quickstart section 5, `data-model.md`, `service-auth.md`, `infrastructure.md`
+  (`INTERNAL_TRUST_PROXY_HOPS` required and `>= 1` in production; `token-ip` and `token-client` limiters),
+  `api.md`, the service card and `INDEX.md`.
+- **Manual QA** ([manual-qa.md](./manual-qa.md), 217 checks): `serviceGuard` and the `service` policy are exercised by
+  unit and integration tests only until `internal-users` ships a guarded production route (N-1); re-run those cases
+  there.
+

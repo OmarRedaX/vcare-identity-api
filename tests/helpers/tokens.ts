@@ -1,4 +1,5 @@
 import { SignJWT } from "jose";
+import type { CustomServiceTokenOptions } from "./types";
 import type { User } from "../../src/app/auth/entity/user.entity";
 import {
   ACCESS_TOKEN_TTL_SECONDS,
@@ -48,4 +49,42 @@ export function tamperToken(token: string): string {
   const [header = "", payload = "", signature = ""] = token.split(".");
   const flipped = `${signature.slice(0, -2)}${signature.slice(-2) === "AA" ? "BB" : "AA"}`;
   return `${header}.${payload}.${flipped}`;
+}
+
+/** A service token with every claim overridable, so the guard can be shown to refuse each defect. */
+export async function signCustomServiceToken(options: CustomServiceTokenOptions = {}): Promise<string> {
+  const keys = options.keys ?? testSigningKeys();
+  const issuedAt = options.issuedAt ?? Math.floor(Date.now() / 1000);
+  const claims: Record<string, unknown> = { typ: options.typ ?? "service" };
+  if (options.scope !== null) {
+    claims.scope = options.scope ?? "users:read";
+  }
+
+  return new SignJWT(claims)
+    .setProtectedHeader({ alg: "EdDSA", kid: keys.activeKid, typ: "JWT" })
+    .setIssuer(options.issuer ?? JWT_ISSUER)
+    .setAudience(options.audience ?? "vcare-identity")
+    .setSubject(options.subject ?? "care-service")
+    .setIssuedAt(issuedAt)
+    .setExpirationTime(options.expiresAt ?? issuedAt + 300)
+    .setJti("00000000-0000-4000-8000-00000000beef")
+    .sign(keys.signingKey);
+}
+
+/** `alg: none` with the claims of a valid service token: structurally a JWT, cryptographically nothing. */
+export function unsignedServiceToken(): string {
+  const encode = (value: object): string => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const header = encode({ alg: "none", typ: "JWT" });
+  const payload = encode({
+    iss: JWT_ISSUER,
+    sub: "care-service",
+    aud: "vcare-identity",
+    typ: "service",
+    scope: "users:read",
+    iat: issuedAt,
+    exp: issuedAt + 300,
+    jti: "00000000-0000-4000-8000-00000000dead",
+  });
+  return `${header}.${payload}.`;
 }

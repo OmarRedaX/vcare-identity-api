@@ -1,4 +1,11 @@
 import { Router } from "express";
+import type { DependencyContainer } from "tsyringe";
+import { serviceGuard } from "../../src/lib/auth/service-guard";
+import type { SigningKeySet } from "../../src/lib/auth/types";
+import { container as rootContainer } from "../../src/lib/di/container";
+import { TOKENS } from "../../src/lib/di/tokens";
+import { authorize } from "../../src/lib/rbac/authorize";
+import type { Clock } from "../../src/lib/time/types";
 import { IsInt, IsString, Max, MaxLength, Min } from "class-validator";
 import { Conflict } from "../../src/lib/error/errors";
 import { clientIp } from "../../src/lib/http/client-ip";
@@ -87,6 +94,38 @@ export function buildTestRouter(deps?: TestRouterDeps): Router {
       count: page.meta.count,
     });
   });
+
+  return sealRouter(router);
+}
+
+/**
+ * Test-only guarded internal routes, mounted through `extraInternalRouter`. They stand in for the routes the
+ * `internal-users` module will add, so the guard and the `service` policy kind are exercised through the real
+ * `createInternalApp` wiring: `serviceGuard -> authorize({ kind: "service", scope }) -> handler`.
+ */
+export function buildInternalProbeRouter(scope: DependencyContainer = rootContainer): Router {
+  const keys = scope.resolve<SigningKeySet>(TOKENS.SigningKeys);
+  const clock = scope.resolve<Clock>(TOKENS.Clock);
+  const guard = serviceGuard({ keys, clock });
+  const router = Router();
+
+  const principal = (req: import("express").Request, res: import("express").Response): void => {
+    const auth = req.auth;
+    sendSuccess(res, auth?.kind === "service" ? { clientId: auth.clientId, scopes: auth.scopes } : null);
+  };
+
+  router.get(
+    "/__test/read",
+    guard,
+    authorize({ kind: "service", scope: "users:read", owner: "none" }),
+    principal,
+  );
+  router.patch(
+    "/__test/write",
+    guard,
+    authorize({ kind: "service", scope: "users:status:write", owner: "none" }),
+    principal,
+  );
 
   return sealRouter(router);
 }

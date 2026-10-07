@@ -23,7 +23,9 @@
     "migrate:make": "tsx src/migrate.ts make",
     "keys:generate": "tsx scripts/generate-signing-key.ts",
     "admin:unusable-hash": "tsx scripts/unusable-password-hash.ts",
-    "denylist:build": "tsx scripts/build-password-denylist.ts"
+    "denylist:build": "tsx scripts/build-password-denylist.ts",
+    "service-client:sql": "tsx scripts/provision-service-client.ts",
+    "seed:service-client": "tsx --env-file-if-exists=.env scripts/seed-service-client.ts"
   },
   "dependencies": {
     "argon2": "^0.45.1",

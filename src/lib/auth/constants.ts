@@ -17,3 +17,14 @@ export const REFRESH_COOKIE_PATH = "/api/auth";
 
 /** 32 random bytes as unpadded base64url — the shape of every refresh token this service issues. */
 export const REFRESH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * Service tokens (client credentials, spec D-8): a constant like the user-token TTL, because the contract fixes
+ * `expires_in` as `const 300`.
+ */
+export const SERVICE_TOKEN_TTL_SECONDS = 300;
+
+/** The scope vocabulary. Must equal `chk_service_clients_allowed_scopes` (a unit test asserts it). */
+export const SERVICE_SCOPES = ["users:read", "users:status:write", "doctors:read"] as const;
+
+export const SERVICE_CLIENT_ID_PATTERN = /^[a-z][a-z0-9-]{2,63}$/;

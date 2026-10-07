@@ -55,3 +55,35 @@ export interface MutableClock {
   advance(ms: number): void;
   set(next: Date): void;
 }
+
+/** Options for `seedServiceClient` -- everything defaults to a synthetic, active `care-service` client. */
+export interface SeedServiceClientOptions {
+  clientId?: string;
+  name?: string;
+  /** Plaintext secret to hash; a random 43-character one by default. */
+  secret?: string;
+  scopes?: string[];
+  audiences?: string[];
+  isActive?: boolean;
+  previous?: { secret: string; expiresAt: Date };
+  deletedAt?: Date;
+}
+
+export interface SeededServiceClient {
+  id: number;
+  clientId: string;
+  secret: string;
+}
+
+/** Claims and header knobs for a hand-signed service token (guard tests). */
+export interface CustomServiceTokenOptions {
+  keys?: import("../../src/lib/auth/types").SigningKeySet;
+  audience?: string | string[];
+  issuer?: string;
+  typ?: string;
+  subject?: string;
+  scope?: string | null;
+  /** Seconds since the epoch. */
+  issuedAt?: number;
+  expiresAt?: number;
+}

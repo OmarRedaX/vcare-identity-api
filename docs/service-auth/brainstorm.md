@@ -46,7 +46,7 @@ Cases 1-3 only, delivered as **two modules, `service-auth` first**:
 ## Key entities & relationships
 
 `service_clients` (`client_id`, `client_secret_hash` argon2id, `allowed_scopes`, `allowed_audiences`,
-disabled flag, soft delete) is defined in `docs/architecture/data-model.md`. `user_status_changes.actor_service`
+`is_active` flag, soft delete) is defined in `docs/architecture/data-model.md`. `user_status_changes.actor_service`
 holds the calling client's `client_id` (logical reference, no FK).
 
 ## Primary flows / endpoints (roles + ownership)
@@ -96,9 +96,9 @@ change `contracts/openapi.yaml` first and tell Care, since `/internal/*` changes
 
 Resolved 2026-10-07:
 
-1. **`disabled_at` column: yes.** `service_clients` gets a disabled marker so ops can lock out a client without
-   deleting its row; the spec step adds it to `data-model.md` and the migration. Disabled clients get
-   `401 InvalidCredentials`.
+1. **Disabled marker: `is_active` (corrected 2026-10-07).** `service_clients.is_active BOOLEAN NOT NULL` already
+   exists in `data-model.md`, so no `disabled_at` column is added. Ops sets `is_active = false` to lock out a client
+   without deleting its row; disabled clients get `401 InvalidCredentials`.
 2. **IP rate limit on failed token requests: yes.** In addition to 60/min per `client_id`, limit by IP so a
    caller probing unknown `client_id`s cannot bypass the per-client limiter. The spec sets the number and the
    Redis-down fallback (ADR 0008).

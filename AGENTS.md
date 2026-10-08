@@ -212,7 +212,7 @@ Unknown errors become `InternalError` (500) with no stack or internals in the bo
 | `AccountPending` | 403 | doctor account awaiting verification tried a doctor-only action |
 | `AccountSuspended` | 403 | suspended account |
 | `AccountRejected` | 403 | reserved — not returned by Identity (rejected accounts can sign in, ADR 0004) |
-| `Forbidden` | 403 | role or ownership check failed |
+| `Forbidden` | 403 | role or ownership check failed, or a non-doctor target on `PATCH /internal/users/:id/status` |
 | `ServiceTokenRequired` | 401 | `/internal/*` called without a valid service token (incl. with a user token) |
 | `InsufficientScope` | 403 | service token lacks the required scope |
 | `NotFound` | 404 | resource absent (or not visible to the caller) |
@@ -271,7 +271,7 @@ export const getMePolicy: Policy = { roles: ["patient", "doctor", "admin"], owne
 | `PATCH /users/:id/status` | admin | none; cannot target self, another admin, or a **doctor** (`403 Forbidden`, ADR 0012) — patients only | active |
 | `GET /users/:id/sessions`, `DELETE /users/:id/sessions` | admin | none | active |
 | `GET /internal/users?ids=` | service token | scope `users:read` | — |
-| `PATCH /internal/users/:id/status` | service token | scope `users:status:write` | — |
+| `PATCH /internal/users/:id/status` | service token | scope `users:status:write`; doctor targets only (a patient or admin target is `403 Forbidden`, ADR 0025) | — |
 | `GET /internal/users/contacts?ids=` | service token | scope `users:contact:read` (care-service only) | — |
 
 `PATCH /auth/me` may change `fullName, phone, avatarUrl, timezone, locale` only — never `email`, `role`, `status`.
@@ -310,10 +310,10 @@ Identity is the **provider** in all five platform integration cases (details: hu
 
 | Case | Caller → endpoint | Identity's contract |
 |---|---|---|
-| 1 — Verification unlocks the account | Care → `PATCH /internal/users/:id/status` `{ status: "active" \| "rejected" \| "pending", reason, actorUserId }` (`pending` = Care re-opened a rejected application) | idempotent: setting the current status again returns 200 with no new history row; valid transitions only (else `409 InvalidStatusTransition`, which callers must treat as non-retryable); returns `{ id, status, updatedAt }` |
+| 1 — Verification unlocks the account | Care → `PATCH /internal/users/:id/status` `{ status: "active" \| "rejected" \| "pending", reason, actorUserId }` (`pending` = Care re-opened a rejected application) | idempotent: setting the current status again returns 200 with no new history row; valid transitions only (else `409 InvalidStatusTransition`, which callers must treat as non-retryable); returns `{ id, status, updatedAt }`. The target must be a doctor; a patient or admin target returns `403 Forbidden` with no write (ADR 0025, non-retryable). |
 | 2 — Batch profile hydration | Care → `GET /internal/users?ids=1,2,3` | one query `WHERE id = ANY($1) AND deleted_at IS NULL`; ≤ 100 ids (else `400 ValidationFailed`); unknown ids are **omitted**, not errors; returns `[{ id, fullName, avatarUrl, role, status, timezone, locale }]` — **no email or phone** |
-| 3 — Suspension revokes sessions | Care → `PATCH /internal/users/:id/status` `{ status: "suspended", reason, actorUserId }` | status update + revoke **all** refresh-token families + status-history row in **one transaction**; only then 200. Already `suspended` → 200 no-op (still ensures no live refresh tokens). Target not `active` → `409 InvalidStatusTransition` (Care only suspends approved doctors, so this signals drift and Care alerts instead of retrying) |
-| 4 — Reinstatement restores the account (ADR 0023, hub ADR 0009) | Care → `PATCH /internal/users/:id/status` `{ status: "active", reason, actorUserId }` | `suspended → active` is accepted here (and only here for doctors); already `active` → 200 no-op with no new history row, so Care's retrier can call blindly; writes a `user_status_changes` row, revokes nothing and revives no refresh token (the user signs in again); any other pair → `409 InvalidStatusTransition` (non-retryable) |
+| 3 — Suspension revokes sessions | Care → `PATCH /internal/users/:id/status` `{ status: "suspended", reason, actorUserId }` | status update + revoke **all** refresh-token families + status-history row in **one transaction**; only then 200. Already `suspended` → 200 no-op (still ensures no live refresh tokens). Target not `active` → `409 InvalidStatusTransition` (Care only suspends approved doctors, so this signals drift and Care alerts instead of retrying). The target must be a doctor; a patient or admin target returns `403 Forbidden` with no write (ADR 0025, non-retryable). |
+| 4 — Reinstatement restores the account (ADR 0023, hub ADR 0009) | Care → `PATCH /internal/users/:id/status` `{ status: "active", reason, actorUserId }` | `suspended → active` is accepted here (and only here for doctors); already `active` → 200 no-op with no new history row, so Care's retrier can call blindly; writes a `user_status_changes` row, revokes nothing and revives no refresh token (the user signs in again); any other pair → `409 InvalidStatusTransition` (non-retryable). The target must be a doctor; a patient or admin target returns `403 Forbidden` with no write (ADR 0025, non-retryable). |
 | 5 — Notification contacts (ADR 0024, hub ADR 0010) | Care's worker → `GET /internal/users/contacts?ids=1,2,3` | one query `WHERE id = ANY($1) AND deleted_at IS NULL`; ≤ 100 ids (else `400 ValidationFailed`); unknown ids are **omitted**; returns `[{ id, email, fullName, locale, status }]` — **no phone**; `Cache-Control: no-store`; the caller holds it in memory for one batch, Identity logs counts only, never an address |
 
 **Rules for Identity as provider**
@@ -326,7 +326,7 @@ Identity is the **provider** in all five platform integration cases (details: hu
 
 **`doctors:read` scope:** Identity issues it, but no MVP service client holds it; it exists for admin tooling and the Phase-2 AI service to call Care's `/internal/doctors/:userId/summary` once such a client is provisioned (hub `TODO.md`).
 
-**Doctor account status — Care is the only initiator (ADR 0012, hub ADR 0006):** `PATCH /api/users/:id/status` refuses doctor targets with `403 Forbidden`, so every doctor status change arrives through `PATCH /internal/users/:id/status` from Care and Care's state always moves with it. A suspended doctor is reinstated only through the same internal route (`suspended → active`, Case 4, ADR 0023); the public admin route still refuses doctor targets.
+**Doctor account status — Care is the only initiator (ADR 0012, hub ADR 0006):** `PATCH /api/users/:id/status` refuses doctor targets with `403 Forbidden`, so every doctor status change arrives through `PATCH /internal/users/:id/status` from Care and Care's state always moves with it. A suspended doctor is reinstated only through the same internal route (`suspended → active`, Case 4, ADR 0023); the public admin route still refuses doctor targets. The internal route is the mirror image of the admin route: it changes doctor accounts only (ADR 0025), so neither route can change an account the other owns, and a leaked `users:status:write` token cannot touch a patient or admin.
 
 ---
 

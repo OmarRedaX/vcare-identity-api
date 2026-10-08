@@ -2,16 +2,24 @@ import { errors, jwtVerify, SignJWT, type CryptoKey, type JWTHeaderParameters } 
 import { TokenExpired, Unauthorized } from "../error/errors";
 import { isAccountStatus, isRole } from "../rbac/types";
 import type { Clock } from "../time/types";
-import type { UserAuth } from "../types/types";
+import type { ServiceAuth, UserAuth } from "../types/types";
 import { randomUuid } from "../../pkg/utils/crypto";
 import {
   ACCESS_TOKEN_TTL_SECONDS,
   CLOCK_TOLERANCE_SECONDS,
   JWT_ISSUER,
   SELF_AUDIENCE,
+  SERVICE_CLIENT_ID_PATTERN,
+  SERVICE_TOKEN_TTL_SECONDS,
   USER_TOKEN_AUDIENCE,
 } from "./constants";
-import type { SignableUser, SigningKeySet } from "./types";
+import type {
+  ServiceTokenFailure,
+  ServiceTokenVerification,
+  SignableService,
+  SignableUser,
+  SigningKeySet,
+} from "./types";
 
 const SUBJECT_PATTERN = /^[1-9][0-9]{0,15}$/;
 
@@ -40,6 +48,24 @@ export class TokenSigner {
       .setSubject(String(user.id))
       .setIssuedAt(issuedAt)
       .setExpirationTime(issuedAt + ACCESS_TOKEN_TTL_SECONDS)
+      .setJti(randomUuid())
+      .sign(this.keys.signingKey);
+  }
+
+  /** Service token (client credentials): `aud` is a single string, `exp = iat + 300` (spec BR-7). */
+  signServiceToken(service: SignableService): Promise<string> {
+    const issuedAt = Math.floor(this.clock.now().getTime() / 1000);
+
+    return new SignJWT({
+      typ: "service",
+      scope: service.scopes.join(" "),
+    })
+      .setProtectedHeader({ alg: "EdDSA", kid: this.keys.activeKid, typ: "JWT" })
+      .setIssuer(JWT_ISSUER)
+      .setAudience(service.audience)
+      .setSubject(service.clientId)
+      .setIssuedAt(issuedAt)
+      .setExpirationTime(issuedAt + SERVICE_TOKEN_TTL_SECONDS)
       .setJti(randomUuid())
       .sign(this.keys.signingKey);
   }
@@ -99,4 +125,85 @@ export async function verifyUserAccessToken(
   }
 
   return { kind: "user", userId, role, status, ev };
+}
+
+class UnknownKid extends Error {}
+
+function failureOf(err: unknown): ServiceTokenFailure {
+  if (err instanceof UnknownKid) {
+    return "unknown_kid";
+  }
+  if (err instanceof errors.JWTExpired) {
+    return "expired";
+  }
+  if (err instanceof errors.JWTClaimValidationFailed) {
+    if (err.claim === "iss") {
+      return "bad_issuer";
+    }
+    if (err.claim === "aud") {
+      return "wrong_audience";
+    }
+    return "bad_claims";
+  }
+  if (err instanceof errors.JWSSignatureVerificationFailed || err instanceof errors.JOSEAlgNotAllowed) {
+    return "bad_signature";
+  }
+  return "malformed";
+}
+
+/**
+ * Verifies a service access token with no I/O (spec section 3.4). `alg` is pinned to EdDSA and the key is
+ * resolved by `kid`. Returns the failure reason instead of throwing, so the guard can log it and answer with
+ * the one `ServiceTokenRequired` response. Expiry is a failure like any other (D-4).
+ */
+export async function verifyServiceAccessToken(
+  token: string,
+  keys: SigningKeySet,
+  clock: Clock,
+): Promise<ServiceTokenVerification> {
+  let payload: Record<string, unknown>;
+  try {
+    const verified = await jwtVerify(
+      token,
+      (header: JWTHeaderParameters): CryptoKey => {
+        const key = header.kid === undefined ? undefined : keys.verifyKeys.get(header.kid);
+        if (key === undefined) {
+          throw new UnknownKid();
+        }
+        return key;
+      },
+      {
+        algorithms: ["EdDSA"],
+        issuer: JWT_ISSUER,
+        audience: SELF_AUDIENCE,
+        clockTolerance: CLOCK_TOLERANCE_SECONDS,
+        currentDate: clock.now(),
+        // jose checks exp only when present; a token without it must not be accepted as never-expiring.
+        requiredClaims: ["exp", "iat", "sub", "jti"],
+      },
+    );
+    payload = verified.payload;
+  } catch (err) {
+    return { ok: false, reason: failureOf(err) };
+  }
+
+  const { sub, typ, scope, jti } = payload;
+  if (typ !== "service") {
+    return { ok: false, reason: "wrong_type" };
+  }
+  if (
+    typeof sub !== "string" ||
+    !SERVICE_CLIENT_ID_PATTERN.test(sub) ||
+    typeof scope !== "string" ||
+    typeof jti !== "string"
+  ) {
+    return { ok: false, reason: "bad_claims" };
+  }
+
+  const auth: ServiceAuth = {
+    kind: "service",
+    clientId: sub,
+    scopes: scope.split(" ").filter((entry) => entry.length > 0),
+  };
+  return { ok: true, auth };
 }

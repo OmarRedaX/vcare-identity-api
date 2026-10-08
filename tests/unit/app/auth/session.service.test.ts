@@ -20,11 +20,13 @@ jest.mock("../../../../src/app/auth/repository/refresh-token.repo", () => ({
   markRotated: jest.fn(),
   revokeFamily: jest.fn(),
   revokeAllForUser: jest.fn(),
+  listLiveFamilies: jest.fn(),
 }));
 jest.mock("../../../../src/app/auth/repository/user.repo", () => ({
   findLiveByEmail: jest.fn(),
   findLiveById: jest.fn(),
   findLiveByIdForUpdate: jest.fn(),
+  findLiveByIdForShare: jest.fn(),
   updatePasswordHash: jest.fn(),
 }));
 jest.mock("../../../../src/lib/rate-limit/rate-limit", () => ({
@@ -143,7 +145,9 @@ beforeEach(() => {
   tokens.revokeAllForUser.mockResolvedValue(2);
   users.updatePasswordHash.mockResolvedValue(1);
   // The locked re-read sees the same account the first read returned unless a test says it changed.
-  users.findLiveByIdForUpdate.mockImplementation(async () => (await users.findLiveByEmail(EMAIL)) as User | undefined);
+  users.findLiveByIdForUpdate.mockImplementation(
+    async () => ((await users.findLiveByEmail(EMAIL)) as User | undefined) ?? user(),
+  );
 });
 
 describe("SessionService.login", () => {
@@ -362,7 +366,7 @@ describe("SessionService.refresh", () => {
   it("should rotate in one transaction and return the new token when the presented token is live", async () => {
     tokens.findByTokenHash.mockResolvedValue(refreshRow());
     tokens.findByIdForUpdate.mockResolvedValue(refreshRow());
-    users.findLiveById.mockResolvedValue(user());
+    users.findLiveByIdForShare.mockResolvedValue(user());
 
     const outcome = await service.refresh(PRESENTED);
 
@@ -408,7 +412,7 @@ describe("SessionService.refresh", () => {
 
     await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "reused" });
 
-    expect(tokens.revokeFamily).toHaveBeenCalledWith(FAMILY, RevokedReason.ReuseDetected);
+    expect(tokens.revokeFamily).toHaveBeenCalledWith(FAMILY, RevokedReason.ReuseDetected, trx);
     expect(sink.lines()).toContainEqual(
       expect.objectContaining({ message: "refresh_token_reuse_detected", familyId: FAMILY }),
     );
@@ -427,7 +431,7 @@ describe("SessionService.refresh", () => {
     );
 
     await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "reused" });
-    expect(tokens.revokeFamily).toHaveBeenCalledWith(FAMILY, RevokedReason.ReuseDetected);
+    expect(tokens.revokeFamily).toHaveBeenCalledWith(FAMILY, RevokedReason.ReuseDetected, trx);
   });
 
   it("should revoke the family when a rotated token has no recorded successor", async () => {
@@ -467,7 +471,7 @@ describe("SessionService.refresh", () => {
   it("should revoke the family and return suspended when the user was suspended meanwhile", async () => {
     tokens.findByTokenHash.mockResolvedValue(refreshRow());
     tokens.findByIdForUpdate.mockResolvedValue(refreshRow());
-    users.findLiveById.mockResolvedValue(user({ status: "suspended" }));
+    users.findLiveByIdForShare.mockResolvedValue(user({ status: "suspended" }));
 
     await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "suspended" });
 
@@ -482,7 +486,7 @@ describe("SessionService.refresh", () => {
   it("should return invalid and roll back when the account was soft-deleted meanwhile", async () => {
     tokens.findByTokenHash.mockResolvedValue(refreshRow());
     tokens.findByIdForUpdate.mockResolvedValue(refreshRow());
-    users.findLiveById.mockResolvedValue(undefined);
+    users.findLiveByIdForShare.mockResolvedValue(undefined);
 
     await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "invalid" });
     expect(trx.rollback).toHaveBeenCalledTimes(1);
@@ -490,6 +494,7 @@ describe("SessionService.refresh", () => {
 
   it("should re-judge as grace when a concurrent refresh rotated the row first", async () => {
     tokens.findByTokenHash.mockResolvedValue(refreshRow());
+    users.findLiveByIdForShare.mockResolvedValue(user());
     tokens.findByIdForUpdate.mockResolvedValue(
       refreshRow({
         revokedAt: new Date(NOW.getTime() - 1000),
@@ -508,15 +513,39 @@ describe("SessionService.refresh", () => {
   it("should roll back and throw when the rotation update affects no row", async () => {
     tokens.findByTokenHash.mockResolvedValue(refreshRow());
     tokens.findByIdForUpdate.mockResolvedValue(refreshRow());
-    users.findLiveById.mockResolvedValue(user());
+    users.findLiveByIdForShare.mockResolvedValue(user());
     tokens.markRotated.mockResolvedValue(0);
 
     await expect(service.refresh(PRESENTED)).rejects.toThrow("refresh_token_rotation_conflict");
     expect(trx.rollback).toHaveBeenCalledTimes(1);
   });
 
+  it("should lock the user FOR SHARE before the token row and re-check expiry under both locks", async () => {
+    tokens.findByTokenHash.mockResolvedValue(refreshRow());
+    users.findLiveByIdForShare.mockResolvedValue(user());
+    tokens.findByIdForUpdate.mockResolvedValue(refreshRow({ expiresAt: new Date(NOW.getTime() - 1) }));
+
+    await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "invalid" });
+
+    const shareOrder = users.findLiveByIdForShare.mock.invocationCallOrder[0] ?? 0;
+    const tokenOrder = tokens.findByIdForUpdate.mock.invocationCallOrder[0] ?? 0;
+    expect(shareOrder).toBeGreaterThan(0);
+    expect(shareOrder).toBeLessThan(tokenOrder);
+    expect(tokens.insertToken).not.toHaveBeenCalled();
+    expect(trx.rollback).toHaveBeenCalledTimes(1);
+  });
+
+  it("should return invalid without locking the token when the user is gone", async () => {
+    tokens.findByTokenHash.mockResolvedValue(refreshRow());
+    users.findLiveByIdForShare.mockResolvedValue(undefined);
+
+    await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "invalid" });
+    expect(tokens.findByIdForUpdate).not.toHaveBeenCalled();
+  });
+
   it("should return invalid when the locked row disappeared before the rotation", async () => {
     tokens.findByTokenHash.mockResolvedValue(refreshRow());
+    users.findLiveByIdForShare.mockResolvedValue(user());
     tokens.findByIdForUpdate.mockResolvedValue(undefined);
 
     await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "invalid" });
@@ -530,7 +559,7 @@ describe("SessionService.logout", () => {
 
     await service.logout(PRESENTED);
 
-    expect(tokens.revokeFamily).toHaveBeenCalledWith(FAMILY, RevokedReason.Logout);
+    expect(tokens.revokeFamily).toHaveBeenCalledWith(FAMILY, RevokedReason.Logout, trx);
     expect(sink.lines()).toContainEqual(expect.objectContaining({ message: "logout", userId: 1042 }));
   });
 
@@ -541,7 +570,7 @@ describe("SessionService.logout", () => {
 
     await service.logout(PRESENTED);
 
-    expect(tokens.revokeFamily).toHaveBeenCalledWith(FAMILY, RevokedReason.Logout);
+    expect(tokens.revokeFamily).toHaveBeenCalledWith(FAMILY, RevokedReason.Logout, trx);
   });
 
   it("should do nothing and never throw when the cookie is absent, malformed or unknown", async () => {
@@ -552,6 +581,115 @@ describe("SessionService.logout", () => {
     await expect(service.logout(PRESENTED)).resolves.toBeUndefined();
 
     expect(tokens.revokeFamily).not.toHaveBeenCalled();
+  });
+
+  it("should lock the user FOR UPDATE before revoking the family, in one transaction (ADR 0020)", async () => {
+    tokens.findByTokenHash.mockResolvedValue(refreshRow());
+    users.findLiveByIdForUpdate.mockResolvedValue(user());
+
+    await service.logout(PRESENTED);
+
+    expect(users.findLiveByIdForUpdate).toHaveBeenCalledWith(1042, trx);
+    const lockOrder = users.findLiveByIdForUpdate.mock.invocationCallOrder[0] ?? 0;
+    const revokeOrder = tokens.revokeFamily.mock.invocationCallOrder[0] ?? 0;
+    const commitOrder = trx.commit.mock.invocationCallOrder[0] ?? 0;
+    expect(lockOrder).toBeGreaterThan(0);
+    expect(lockOrder).toBeLessThan(revokeOrder);
+    expect(revokeOrder).toBeLessThan(commitOrder);
+    expect(dbMock.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("should revoke nothing, roll back and log nothing when the user no longer exists", async () => {
+    tokens.findByTokenHash.mockResolvedValue(refreshRow());
+    users.findLiveByIdForUpdate.mockResolvedValue(undefined);
+
+    await expect(service.logout(PRESENTED)).resolves.toBeUndefined();
+
+    expect(tokens.revokeFamily).not.toHaveBeenCalled();
+    expect(trx.rollback).toHaveBeenCalledTimes(1);
+    expect(trx.commit).not.toHaveBeenCalled();
+    expect(sink.lines().map((line) => line.message)).not.toContain("logout");
+  });
+
+  it("should roll back and rethrow when the family revocation fails, never committing", async () => {
+    tokens.findByTokenHash.mockResolvedValue(refreshRow());
+    tokens.revokeFamily.mockRejectedValue(new Error("connection lost"));
+
+    await expect(service.logout(PRESENTED)).rejects.toThrow("connection lost");
+
+    expect(trx.commit).not.toHaveBeenCalled();
+    expect(trx.rollback).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SessionService reuse-detection revocation lock order (ADR 0020)", () => {
+  const reused = (): RefreshToken =>
+    refreshRow({
+      revokedAt: new Date(NOW.getTime() - 11_000),
+      revokedReason: RevokedReason.Rotated,
+      replacedById: 77,
+    });
+
+  it("should lock the user FOR UPDATE before revoking the family with reuse_detected", async () => {
+    tokens.findByTokenHash.mockResolvedValue(reused());
+    users.findLiveByIdForUpdate.mockResolvedValue(user());
+
+    await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "reused" });
+
+    expect(users.findLiveByIdForUpdate).toHaveBeenCalledWith(1042, trx);
+    const lockOrder = users.findLiveByIdForUpdate.mock.invocationCallOrder[0] ?? 0;
+    const revokeOrder = tokens.revokeFamily.mock.invocationCallOrder[0] ?? 0;
+    expect(lockOrder).toBeGreaterThan(0);
+    expect(lockOrder).toBeLessThan(revokeOrder);
+    expect(tokens.revokeFamily).toHaveBeenCalledWith(FAMILY, RevokedReason.ReuseDetected, trx);
+  });
+
+  it("should not take any lock on the grace path, which only reads", async () => {
+    tokens.findByTokenHash.mockResolvedValue(
+      refreshRow({
+        revokedAt: new Date(NOW.getTime() - 3000),
+        revokedReason: RevokedReason.Rotated,
+        replacedById: 77,
+      }),
+    );
+    tokens.findById.mockResolvedValue(refreshRow({ id: 77 }));
+
+    await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "grace" });
+
+    expect(dbMock.transaction).not.toHaveBeenCalled();
+    expect(users.findLiveByIdForUpdate).not.toHaveBeenCalled();
+  });
+
+  it("should still answer reused and revoke nothing when the user was soft-deleted meanwhile", async () => {
+    tokens.findByTokenHash.mockResolvedValue(reused());
+    users.findLiveByIdForUpdate.mockResolvedValue(undefined);
+
+    await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "reused" });
+
+    expect(tokens.revokeFamily).not.toHaveBeenCalled();
+  });
+
+  it("should re-judge a concurrently revoked row under the locks and revoke the family once when it was reuse", async () => {
+    tokens.findByTokenHash.mockResolvedValue(refreshRow());
+    users.findLiveByIdForShare.mockResolvedValue(user());
+    tokens.findByIdForUpdate.mockResolvedValue(reused());
+
+    await expect(service.refresh(PRESENTED)).resolves.toEqual({ kind: "reused" });
+
+    expect(tokens.revokeFamily).toHaveBeenCalledTimes(1);
+    expect(tokens.revokeFamily).toHaveBeenCalledWith(FAMILY, RevokedReason.ReuseDetected, trx);
+  });
+});
+
+describe("SessionService.listLiveFamilies", () => {
+  it("should delegate to the repository with the injected clock's now, the cursor and the limit", async () => {
+    const families = [{ familyId: FAMILY }];
+    tokens.listLiveFamilies.mockResolvedValue(families);
+    const cursor = { createdAt: "2026-09-18T10:00:00.000001Z", familyId: FAMILY };
+
+    await expect(service.listLiveFamilies(1042, cursor, 20)).resolves.toBe(families);
+
+    expect(tokens.listLiveFamilies).toHaveBeenCalledWith(1042, NOW, cursor, 20);
   });
 });
 

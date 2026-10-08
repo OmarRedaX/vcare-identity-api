@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: explanation
-last_verified: 2026-09-16
+last_verified: 2026-10-08
 tags: [architecture, overview, layering, middleware]
 related: [system-design, data-model, api, auth-tokens, service-auth, infrastructure, deployment, design-baseline, foundation-spec]
 ---
@@ -123,7 +123,7 @@ built (`src/app.ts`, `src/internal-app.ts`); stages 7–11 are per-route middlew
 | 3 | request log | `lib/logger/request-logger` | one `request_completed` line on finish (health routes only when ≥ 500) |
 | 4 | `helmet` | app-level | security headers; HSTS on the public listener in production only |
 | 5 | CORS | `lib/http/cors` — public listener, non-production only | exact-match allowlist from `CORS_ORIGINS`, credentials only for listed origins; preflight → `204` |
-| 6 | JSON body parser | app-level | `application/json`, strict, 100 kb; a form parser only on `/internal/auth/token` (planned) |
+| 6 | JSON body parser | app-level | `application/json`, strict, 100 kb; a form parser only on `/internal/auth/token` (route-scoped `application/x-www-form-urlencoded`, 100 kb; as built) |
 | 7 | rate limit | `lib/rate-limit` | Redis sliding window per route key (IP, IP+email, email, family, client) → `429 RateLimited` + `Retry-After`; in-process fallback or fail-open when Redis is down |
 | 8 | guard (planned) | `lib/auth/user-guard` or `service-guard` | verify signature (EdDSA, `kid` from JWKS set), `iss`, `aud`, `exp`, `typ`; set `req.auth`; refresh routes read the `vcare_rt` cookie instead |
 | 9 | authorize (planned) | `lib/rbac/authorize(policy)` | deny by default: role ∈ policy roles **and** ownership predicate **and** account-state requirement; else `403` (or `404` where existence would leak) |

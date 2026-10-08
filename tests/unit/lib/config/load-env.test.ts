@@ -97,11 +97,25 @@ describe("loadEnv trust proxy", () => {
     expect(keysOf({ ...PRODUCTION, TRUST_PROXY_HOPS: "0" })).toContain("TRUST_PROXY_HOPS");
   });
 
-  it("should accept an explicit hop count and default the internal listener to 0 when in production", () => {
-    const env = loadEnv({ ...PRODUCTION, TRUST_PROXY_HOPS: "2" });
+  it("should accept explicit hop counts for both listeners when in production", () => {
+    const env = loadEnv({ ...PRODUCTION, TRUST_PROXY_HOPS: "2", INTERNAL_TRUST_PROXY_HOPS: "1" });
 
     expect(env.TRUST_PROXY_HOPS).toBe(2);
-    expect(env.INTERNAL_TRUST_PROXY_HOPS).toBe(0);
+    expect(env.INTERNAL_TRUST_PROXY_HOPS).toBe(1);
+  });
+
+  it("should reject INTERNAL_TRUST_PROXY_HOPS when it is unset and NODE_ENV is production", () => {
+    expect(keysOf({ ...PRODUCTION, TRUST_PROXY_HOPS: "2" })).toContain("INTERNAL_TRUST_PROXY_HOPS");
+  });
+
+  it("should reject INTERNAL_TRUST_PROXY_HOPS when it is 0 and NODE_ENV is production", () => {
+    expect(keysOf({ ...PRODUCTION, TRUST_PROXY_HOPS: "2", INTERNAL_TRUST_PROXY_HOPS: "0" })).toContain(
+      "INTERNAL_TRUST_PROXY_HOPS",
+    );
+  });
+
+  it("should default INTERNAL_TRUST_PROXY_HOPS to 0 when NODE_ENV is not production", () => {
+    expect(loadEnv(VALID).INTERNAL_TRUST_PROXY_HOPS).toBe(0);
   });
 });
 
@@ -110,6 +124,7 @@ describe("loadEnv production hardening", () => {
     ...VALID,
     NODE_ENV: "production",
     TRUST_PROXY_HOPS: "1",
+    INTERNAL_TRUST_PROXY_HOPS: "1",
     DATABASE_URL: "postgres://identity:identity@db.example.test:5432/vcare_identity?sslmode=require",
     REDIS_URL: "rediss://cache.example.test:6379",
     OTP_PEPPER: "a-production-pepper-with-at-least-32-characters",

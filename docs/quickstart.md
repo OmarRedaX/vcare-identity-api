@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: tutorial
-last_verified: 2026-10-04
+last_verified: 2026-10-08
 tags: [tutorial, getting-started, local-dev, curl, docker, tests]
-related: [infrastructure, api, auth-tokens, design-baseline, foundation-spec, foundation-manual-qa]
+related: [infrastructure, api, auth-tokens, design-baseline, foundation-spec, foundation-manual-qa, service-auth-spec, service-auth-manual-qa, runbook]
 ---
 
 # Quickstart (tutorial)
@@ -58,7 +58,6 @@ JWT_PRIVATE_KEYS=
 JWT_ACTIVE_KID=local-dev-1
 ACCESS_TOKEN_TTL_SECONDS=900
 REFRESH_TOKEN_TTL_DAYS=30
-SERVICE_TOKEN_TTL_SECONDS=300
 APP_BASE_URL=http://localhost:5173
 EMAIL_PROVIDER_API_KEY=local-dev-not-sent
 EMAIL_PROVIDER_FROM=no-reply@example.test
@@ -184,17 +183,33 @@ curl -s -o /dev/null -w "%{http_code}\n" -b "$JAR" -c "$JAR" -X POST http://loca
 ```
 Expect `204` and a cleared cookie. The access token still works until it expires (at most 15 minutes).
 
-## 5. Try the internal API (optional, planned)
-Seed a local service client, then exchange credentials on the internal listener:
+## 5. Try the internal API (optional)
+The token exchange (module `service-auth`) works today; the guarded `/internal/users` routes arrive with the
+`internal-users` module and answer `404` until then.
+
+Seed a local service client (local development only: the script refuses `NODE_ENV=production`, reads `DATABASE_URL`
+from `.env`, and upserts the live row, replacing its secret). Every argument is optional; the defaults are
+`--client-id care-service --name "Care service (local)" --scopes "users:read users:status:write" --audiences vcare-identity`:
 ```bash
-npm run seed:service-client -- --client-id care-service --scopes "users:read users:status:write" --audiences vcare-identity   # (planned) prints a one-time secret
+npm run seed:service-client
+# prints client_id=care-service and a fresh client_secret=<secret>, once. Run it again to get a new secret.
+```
+Then exchange credentials on the internal listener (JSON or `application/x-www-form-urlencoded`):
+```bash
 curl -s -X POST http://localhost:3100/internal/auth/token \
   -H "Content-Type: application/json" -H "X-Request-Id: $(rid)" \
   -d '{"grant_type":"client_credentials","client_id":"care-service","client_secret":"<printed secret>","scope":"users:read","audience":"vcare-identity"}'
-SVC=<paste data.access_token>
-curl -s "http://localhost:3100/internal/users?ids=1,2,3" -H "Authorization: Bearer $SVC" -H "X-Request-Id: $(rid)"
 ```
-Now send your **user** token to the same route — expect `401 ServiceTokenRequired`.
+Expect `200` with `data.access_token`, `token_type: "Bearer"`, `expires_in: 300` and `scope: "users:read"`, plus
+`Cache-Control: no-store`. A wrong secret is `401 InvalidCredentials`; a scope or audience the client may not have is
+`403 InsufficientScope`. The limits are 30/min per IP and 60/min per `client_id`. Decode the token to see
+`typ: "service"` and a single-string `aud`. For a non-local client use the print-SQL procedure in the
+[runbook](./runbook.md) → Provision a service client.
+
+Once `internal-users` exists, call `GET http://localhost:3100/internal/users?ids=1,2,3` with
+`Authorization: Bearer $SVC`, and send your **user** token to the same route to see `401 ServiceTokenRequired`. The
+repeatable CURL walkthrough for the token exchange is [service-auth/manual-qa.md](./service-auth/manual-qa.md)
+(`scripts/curl-test-service-auth.sh`).
 
 ## Next
 - Every endpoint, role, and error code → [architecture/api.md](./architecture/api.md) and

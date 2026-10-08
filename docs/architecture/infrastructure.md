@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: reference
-last_verified: 2026-10-04
+last_verified: 2026-10-08
 tags: [architecture, infrastructure, env, logging, health, rate-limit, idempotency, shutdown]
 related: [system-design, overview, auth-tokens, runbook, quickstart, deployment, foundation-spec, adr-0008-redis-tier-2-fallback-limiter, adr-0013-log-derived-metrics, adr-0014-health-liveness-readiness-split, adr-0015-foundation-runtime-dependencies]
 ---
@@ -32,7 +32,7 @@ module (`planned`).
 | `INTERNAL_PORT` | int 1..65535, ≠ `PORT` | `3100` | no | foundation | internal listener |
 | `INTERNAL_HOST` | IPv4 or IPv6 address | `127.0.0.1` | no | foundation | interface the internal listener binds to; a container deployment sets the task's private interface (dev compose uses `0.0.0.0`) |
 | `TRUST_PROXY_HOPS` | int 0..10 | `0` outside production; **required, >= 1 in production** | prod: yes | foundation | Express `trust proxy` on the **public** app = proxy hops in front of the task (CloudFront + ALB = 2); drives `req.ip` for rate-limit and idempotency subjects |
-| `INTERNAL_TRUST_PROXY_HOPS` | int 0..10 | `0` | no | foundation | Express `trust proxy` on the **internal** app = hops of the internal LB; no IP-keyed decision uses it yet |
+| `INTERNAL_TRUST_PROXY_HOPS` | int 0..10 | `0` outside production; **required, >= 1 in production** (the process refuses to start otherwise) | no | foundation | Express `trust proxy` on the **internal** app = hops of the internal LB (`1` for one internal LB); drives `clientIp(req)` for the `token-ip` limiter on `POST /internal/auth/token`. With `0` behind a load balancer every Care task shares the LB's address in one 30/min bucket |
 | `DATABASE_URL` | `postgres://` or `postgresql://` URL | — | yes | foundation | identity database |
 | `DATABASE_POOL_MAX` | int 1..100 | `10` | no | foundation | Knex pool size per process |
 | `REDIS_URL` | `redis://` or `rediss://` URL | — | yes | foundation | rate limits, idempotency |
@@ -49,7 +49,6 @@ module (`planned`).
 | `JWT_ISSUER` | string | `vcare-identity` | no | planned | `iss` claim |
 | `ACCESS_TOKEN_TTL_SECONDS` | int | `900` | no | planned | user access token lifetime |
 | `REFRESH_TOKEN_TTL_DAYS` | int | `30` | no | planned | refresh token lifetime and cookie `Max-Age` |
-| `SERVICE_TOKEN_TTL_SECONDS` | int | `300` | no | planned | service token lifetime |
 | `APP_BASE_URL` | URL | — | no | planned | base for links in password-reset emails |
 | `EMAIL_PROVIDER_API_KEY` | string | — | yes | planned | email provider credential |
 | `EMAIL_PROVIDER_FROM` | email address | — | no | planned | sender address |
@@ -64,6 +63,9 @@ module (`planned`).
 Planned rows come from the 2026-09-15 baseline ([deployment.md](./deployment.md) → New configuration).
 `APP_BASE_URL` is still needed: it builds the password-reset links (verification links no longer exist, ADR 0006).
 The foundation added `TRUST_PROXY_HOPS`, which replaces the unnamed "ingress hop count" setting.
+
+The service token lifetime is not an env var: `SERVICE_TOKEN_TTL_SECONDS = 300` is a constant in
+`lib/auth/constants.ts`, because the contract fixes `expires_in` at 300 (service-auth spec D-8).
 
 Time arithmetic from these values uses `pkg/utils/time.ts` (`addTime`, `toMs`) — never inline math.
 
@@ -108,7 +110,8 @@ dimensions. `LOG_LEVEL` never suppresses it. Emitted today: `rate_limited` and `
 `limiter`). The rest of the metric set in [deployment.md](./deployment.md) → Observability is planned.
 
 Security-relevant events logged at `warn` with a stable `message` (used by alerts): `rate_limited` (as built);
-`refresh_token_reuse_detected`, `login_failed`, `service_token_denied`, `status_changed` (info) — planned.
+`service_token_denied` (warn, with metric of the same name, dimension `reason`) and `service_token_issued` (info) — as built by service-auth ([service-auth.md](./service-auth.md) section 8 lists the reasons);
+`refresh_token_reuse_detected`, `login_failed`, `status_changed` (info) — see the auth and users specs.
 
 **Knex output:** Knex's own warnings, errors and deprecations are routed through `Logger` via the `log` option
 built by `buildKnexLog` (`lib/knex/knexfile.ts`), so a Postgres outage writes JSON lines only:
@@ -190,7 +193,8 @@ Worker process: log `worker_stopping` and stop the loop (the current tick finish
 | `forgot-email` | `POST /api/auth/forgot-password` | sha256(lower(email)) | 3 | 1 h |
 | `reset-ip` | `POST /api/auth/reset-password` | IP | 10 | 1 h |
 | `refresh-family` | `POST /api/auth/refresh` | `family_id` | 30 | 1 min |
-| `service-token-client` | `POST /internal/auth/token` | `client_id` | 60 | 1 min |
+| `token-ip` | `POST /internal/auth/token` (as built) | client IP (`INTERNAL_TRUST_PROXY_HOPS`) | 30 | 1 min |
+| `token-client` | `POST /internal/auth/token` (as built) | `client_id` if it matches the client-id pattern, else the constant `invalid` | 60 | 1 min |
 
 The register rows replace `register-ip`, `resend-email`, and `verify-ip` from the current contract (ADR 0006). Each
 registration challenge also allows at most 5 code attempts.

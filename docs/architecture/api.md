@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: ready
 diataxis: reference
-last_verified: 2026-10-04
+last_verified: 2026-10-08
 tags: [architecture, api, endpoints, rbac, error-codes]
 related: [system-design, auth-tokens, service-auth, infrastructure, design-baseline, foundation-spec]
 ---
@@ -20,7 +20,7 @@ If this page and the contract disagree, the contract wins and this page is stale
 > route (ADR 0012), and the health split (ADR 0014).
 >
 > **Built:** the `foundation` module (health) and the `auth` module (every `/api/auth/*` operation and
-> `/.well-known/jwks.json`). `users`, `service-auth` and `internal-users` below are contract-only until built.
+> `/.well-known/jwks.json`). `users` (admin, 2026-10-07) is built too; `service-auth` (`POST /internal/auth/token`, 2026-10-08) is built; `internal-users` below is contract-only until built.
 Per-field request/response schemas are in the contract; this page shows roles, ownership, and errors.
 
 ## Conventions
@@ -78,10 +78,11 @@ Notes
 | `GET /api/users` | admin (active) | none | `200` `User[]` + `PaginationMeta` | `ValidationFailed` 400 · `Unauthorized` / `TokenExpired` 401 · `Forbidden` / `AccountSuspended` 403 |
 | `GET /api/users/{id}` | admin (active) | none | `200` `User` | `ValidationFailed` 400 · `Unauthorized` / `TokenExpired` 401 · `Forbidden` / `AccountSuspended` 403 · `NotFound` 404 |
 | `PATCH /api/users/{id}/status` | admin (active) | none; patients only (not self, not an admin, not a doctor) | `200` `StatusChangeResponse` | `ValidationFailed` 400 · `Unauthorized` / `TokenExpired` 401 · `Forbidden` / `AccountSuspended` 403 (incl. self / admin / doctor target) · `NotFound` 404 · `InvalidStatusTransition` 409 |
-| `GET /api/users/{id}/sessions` | admin (active) | none | `200` `Session[]` + `PaginationMeta` | `ValidationFailed` 400 · `Unauthorized` / `TokenExpired` 401 · `Forbidden` 403 · `NotFound` 404 |
-| `DELETE /api/users/{id}/sessions` | admin (active) | none | `204` | `ValidationFailed` 400 · `Unauthorized` / `TokenExpired` 401 · `Forbidden` 403 · `NotFound` 404 |
+| `GET /api/users/{id}/sessions` | admin (active) | none | `200` `Session[]` + `PaginationMeta` | `ValidationFailed` 400 · `Unauthorized` / `TokenExpired` 401 · `Forbidden` / `AccountSuspended` 403 · `NotFound` 404 |
+| `DELETE /api/users/{id}/sessions` | admin (active) | none | `204` | `ValidationFailed` 400 · `Unauthorized` / `TokenExpired` 401 · `Forbidden` / `AccountSuspended` 403 · `NotFound` 404 |
 
 Notes
+- The four `200` responses carry `Cache-Control: no-store` (PII). Mutations re-read the acting admin's live row (a suspended or deleted admin is refused even with a valid token).
 - `GET /api/users` filters: `role`, `status`, `email` (exact, case-insensitive). Sort fixed at `created_at DESC, id DESC`.
 - Admin status body `{ status: "active" | "suspended", reason }`. Allowed: `active → suspended`, `suspended → active`.
   Same status again → 200, no history row. Patient reinstatement (`suspended → active`) exists **only** on this
@@ -110,10 +111,10 @@ Notes
 ## Tag: service-auth (internal listener)
 | Method + path | Roles | Scope | Success | Error codes | Rate limit |
 |---|---|---|---|---|---|
-| `POST /internal/auth/token` | service (client credentials in body) | none | `200` `ServiceTokenResponse` `{ access_token, token_type: "Bearer", expires_in: 300, scope }` | `ValidationFailed` 400 · `InvalidCredentials` 401 (unknown/disabled client or wrong secret) · `InsufficientScope` 403 (scope or audience not allowed) · `RateLimited` 429 | 60/min per client |
+| `POST /internal/auth/token` | service (client credentials in body) | none | `200` `ServiceTokenResponse` `{ access_token, token_type: "Bearer", expires_in: 300, scope }` | `ValidationFailed` 400 · `InvalidCredentials` 401 (unknown, soft-deleted or disabled client, wrong secret, expired previous secret) · `InsufficientScope` 403 (scope or audience not allowed, checked after the secret verified) · `RateLimited` 429 (`Retry-After`) | 30/min per client IP and 60/min per `client_id` |
 
 Body (JSON or form-encoded): `grant_type=client_credentials`, `client_id`, `client_secret`, `scope`
-(space-separated), `audience`. See [service-auth.md](./service-auth.md).
+(space-separated), `audience`. The issued token's `aud` is a single string. See [service-auth.md](./service-auth.md).
 
 ## Tag: internal-users (internal listener)
 | Method + path | Roles | Scope | Success | Error codes |

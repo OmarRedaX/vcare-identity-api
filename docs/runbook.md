@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: how-to
-last_verified: 2026-10-04
+last_verified: 2026-10-08
 tags: [runbook, operations, on-call, identity]
-related: [service-card, auth-tokens, service-auth, infrastructure, deployment, foundation-manual-qa]
+related: [service-card, auth-tokens, service-auth, adr-0022-service-client-rotation-window-timing, service-auth-spec, infrastructure, deployment, foundation-manual-qa]
 ---
 
 # Runbook — identity-service
@@ -14,10 +14,11 @@ related: [service-card, auth-tokens, service-auth, infrastructure, deployment, f
 On-call guide. Task-oriented; assumes the service is deployed. Identity is **Tier 1**: an outage stops
 all logins and refreshes platform-wide, and blocks Care's Case 3 suspensions (Care retries and alerts).
 
-> Status (2026-09-16): the `foundation` module is built — health probes, graceful shutdown, structured logs,
-> and the Redis-down behaviour below are real. Auth, users, sessions, service-auth, and the outbox are not built
-> yet: their alerts and procedures are the contract for the observability and ops work done when those modules
-> land.
+> Status (2026-10-08): the `foundation`, `auth`, `users` and `service-auth` modules are built — health probes,
+> graceful shutdown, structured logs, the Redis-down behaviour, the auth flows, the outbox worker, the admin
+> status/session routes, and the service-client token endpoint and provisioning scripts used below are real.
+> `internal-users` (`/internal/users`, `/internal/users/{id}/status`) is not built yet: its alerts and procedures are
+> the contract for the ops work done when that module lands.
 
 ## At a glance
 | | |
@@ -47,8 +48,9 @@ all logins and refreshes platform-wide, and blocks Care's Case 3 suspensions (Ca
 | `OutboxDeadJobs` | any job in `dead` | persistent provider rejection (bad address, auth) | `SELECT type, last_error, count(*) FROM outbox_jobs WHERE status='dead' GROUP BY 1,2;` fix the cause; re-queue with `UPDATE … SET status='pending', attempts=0, run_after=now()` via the audited ops console |
 | `DbPoolSaturated` (planned: pool metrics are not emitted yet) | pool wait p95 > 200 ms for 5 min | traffic spike, slow queries, too few tasks | check slow-query log and `EXPLAIN` hot paths; scale out `identity-api`; confirm purge batches are not running unthrottled |
 
-Additional signal to watch (no page): `service_token_denied` warnings — a spike usually means a Care
-deploy with a rotated or wrong secret, or a user token sent to `/internal/*`.
+Additional signal to watch (no page): `service_token_denied` warnings (metric of the same name, dimension `reason`) —
+a spike usually means a Care deploy with a rotated or wrong secret, or a user token sent to `/internal/*`. Treat
+`bad_secret` and `secret_expired` as one series (ADR 0022; see Rotate a service client secret).
 
 ## Common tasks
 
@@ -66,19 +68,67 @@ key, then revoke all sessions platform-wide
 (`UPDATE refresh_tokens SET revoked_at = now(), revoked_reason = 'admin_revoked' WHERE revoked_at IS NULL;`
 via the audited ops console, with an incident ticket). Announce forced re-login in `#alerts-identity`.
 
+### Provision a service client (e.g. `care-service`)
+Clients are created by ops SQL, never by an API. `scripts/provision-service-client.ts` **prints** the SQL and never
+connects to a database. Run it from a checkout with dependencies installed, in an audited session.
+1. Open a ticket naming the client, its scopes and audiences (scopes: `users:read`, `users:status:write`,
+   `doctors:read`; audiences look like `vcare-identity`).
+2. Generate the SQL. The `INSERT` (argon2id hash only) goes to stdout, the plaintext secret goes **once** to stderr:
+   ```bash
+   npm run service-client:sql -- --client-id care-service --name "Care service" \
+     --scopes "users:read users:status:write" --audiences vcare-identity > new-client.sql
+   ```
+   Copy the secret from the stderr banner straight into the caller's secret manager. It is not stored anywhere else
+   and cannot be recovered; if you lose it, rotate.
+3. Run the file against the target database with `psql -f new-client.sql` (the hash contains `$`: never paste it
+   into an unquoted shell heredoc). Delete the file afterwards.
+4. Verify from the caller's network: `POST /internal/auth/token` returns `200` and the logs show
+   `service_token_issued` for the `clientId`.
+
 ### Rotate a service client secret (e.g. `care-service`)
 Zero-downtime using the two-secret overlap ([architecture/service-auth.md](./architecture/service-auth.md) → Secret rotation model).
-1. Generate a new ≥ 256-bit random secret.
-2. Via the ops procedure, move the current `client_secret_hash` to `previous_secret_hash`, set
-   `previous_secret_expires_at = now() + interval '24 hours'`, write the argon2id hash of the new secret to
-   `client_secret_hash`, set `secret_rotated_at = now()`.
-3. Update the caller's secret store with the new secret and redeploy the caller.
-4. Confirm the caller obtains tokens: no `service_token_denied` warnings for its `clientId`; Care's internal
-   calls succeed.
-5. Clear `previous_secret_hash` and `previous_secret_expires_at` once confirmed (or let them expire).
+1. Generate the rotation SQL (default overlap 24 h, maximum 168 h):
+   ```bash
+   npm run service-client:sql -- --client-id care-service --rotate [--overlap-hours 24] > rotate.sql
+   ```
+   It moves the current hash to `previous_secret_hash`, sets `previous_secret_expires_at = now() + interval 'N hours'`,
+   writes the new argon2id hash to `client_secret_hash` and sets `secret_rotated_at`. The new secret is printed once
+   to stderr.
+2. Run `psql -f rotate.sql` and **check the `UPDATE n` count: it must be `UPDATE 1`.** The script cannot know whether
+   the client exists, so a mistyped `--client-id` prints valid SQL that touches nothing (`UPDATE 0`). If it is `0`,
+   fix the id and run the script again (the printed secret belongs to that run only).
+3. Put the new secret in the caller's secret manager and redeploy the caller within the overlap.
+4. Confirm the caller obtains tokens: no `service_token_denied` warnings for its `clientId`, and Care's internal
+   calls succeed. The old secret stops working at `previous_secret_expires_at` on its own; nothing needs clearing
+   (the next rotation overwrites the expired pair).
 
-**Leaked secret:** skip the overlap — write the new hash, clear `previous_secret_hash`, redeploy the caller.
-Outstanding tokens die within 300 s. To cut a client off entirely, set `is_active = false`.
+**Leaked secret:** run the script with `--rotate --leaked`. It writes the new hash and clears
+`previous_secret_hash` and `previous_secret_expires_at`, so the old secret fails immediately. Check `UPDATE 1`,
+update the caller's secret manager, redeploy the caller. Outstanding tokens die within 300 s.
+
+**Reading `service_token_denied` during a rotation:** reasons are `unknown_client`, `inactive`, `bad_secret`,
+`secret_expired`, `scope`, `audience`. `secret_expired` is only a hint ("wrong secret on a client whose rotation
+window has closed"); the previous hash is not verified once it has expired, so it does not prove the old secret was
+used (ADR 0022). Alert and investigate on `bad_secret` plus `secret_expired` together, not on `secret_expired` alone.
+A wrong secret on a client inside an open window costs two argon2id verifies (about double latency); this is an
+accepted residual (ADR 0022).
+
+### Disable a service client
+Cut a client off without deleting it (soft delete via `deleted_at` frees the `client_id`):
+```sql
+UPDATE service_clients SET is_active = false, updated_at = now() WHERE client_id = '<client_id>' AND deleted_at IS NULL;
+```
+Check `UPDATE 1`. New exchanges fail with `401 InvalidCredentials` at once; tokens already issued keep working
+until their `exp`, **at most 300 s**, because the service guard reads no database. To re-enable, set
+`is_active = true`.
+
+### Handle a `429` storm on `POST /internal/auth/token`
+Limits are 30/min per client IP and 60/min per `client_id` (`Retry-After` is set). Care caches its token and
+re-exchanges about 60 s before expiry, so legitimate volume is a handful per minute. If every Care task sees
+`429` together, check `INTERNAL_TRUST_PROXY_HOPS`: production requires `>= 1`, and with a wrong value all tasks share
+the load balancer's address in one 30/min bucket. A caller spamming bad secrets for `care-service` can also exhaust
+that client's 60/min bucket (accepted residual); find the source in the `rate_limited` and `service_token_denied`
+logs.
 
 ### Revoke a user's sessions
 - Preferred (audited, API): as an admin,

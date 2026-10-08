@@ -284,3 +284,62 @@ export function expectJwksDocument(body: unknown): void {
     expect(Object.keys(jwk).sort()).toEqual([...contractRequired("Jwk")].sort());
   }
 }
+
+// ── users (module: users) ───────────────────────────────────────────────────
+
+/** Asserts `meta` against contracts/openapi.yaml -> schemas.PaginationMeta. */
+export function expectPaginationMeta(meta: unknown): {
+  nextCursor: string | null;
+  hasMore: boolean;
+  count: number;
+} {
+  const parsed = meta as { nextCursor: string | null; hasMore: boolean; count: number };
+  expect(Object.keys(parsed).sort()).toEqual([...contractRequired("PaginationMeta")].sort());
+  expect(parsed.nextCursor === null || typeof parsed.nextCursor === "string").toBe(true);
+  expect(typeof parsed.hasMore).toBe("boolean");
+  expect(Number.isInteger(parsed.count)).toBe(true);
+  expect(parsed.count).toBeGreaterThanOrEqual(0);
+  expect(parsed.nextCursor === null).toBe(!parsed.hasMore);
+  return parsed;
+}
+
+/** Asserts a `Session` payload against contracts/openapi.yaml -> schemas.Session. */
+export function expectSessionPayload(data: unknown): Record<string, unknown> {
+  const session = data as Record<string, unknown>;
+  expect(Object.keys(session).sort()).toEqual([...contractRequired("Session")].sort());
+  expect(session.familyId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  );
+  expect(session.deviceInfo === null || typeof session.deviceInfo === "string").toBe(true);
+  for (const field of ["createdAt", "lastUsedAt", "expiresAt"]) {
+    expect(new Date(String(session[field])).toISOString()).toBe(session[field]);
+  }
+  return session;
+}
+
+/** Asserts a `StatusChangeResponse` payload against contracts/openapi.yaml -> schemas.StatusChangeResponse. */
+export function expectStatusChangePayload(data: unknown): { id: number; status: string; updatedAt: string } {
+  const payload = data as { id: number; status: string; updatedAt: string };
+  expect(Object.keys(payload).sort()).toEqual([...contractRequired("StatusChangeResponse")].sort());
+  expect(typeof payload.id).toBe("number");
+  expect(contractStatuses()).toContain(payload.status);
+  expect(new Date(payload.updatedAt).toISOString()).toBe(payload.updatedAt);
+  return payload;
+}
+
+/**
+ * The operation must declare the status (and, for an error, list the code in `x-error-codes`), so a status or
+ * error code the code returns but the contract does not list fails here instead of being accepted silently.
+ */
+export function expectContractDeclares(
+  pathName: string,
+  method: string,
+  status: number,
+  errorCode?: string,
+): void {
+  const operation = contractOperation(pathName, method);
+  expect(operation.statuses).toContain(String(status));
+  if (errorCode !== undefined) {
+    expect(operation.errorCodes).toContain(errorCode);
+  }
+}

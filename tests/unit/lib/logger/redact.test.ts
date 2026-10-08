@@ -114,4 +114,15 @@ describe("redact", () => {
     expect("fn" in output).toBe(false);
     expect(output.keep).toBe(1);
   });
+
+  it("should redact the current and previous service client secret hashes in any casing", () => {
+    const output = asRecord(
+      redact({ clientSecretHash: "h1", previousSecretHash: "h2", previous_secret_hash: "h3", keep: 1 }),
+    );
+
+    expect(output.clientSecretHash).toBe(REDACTED);
+    expect(output.previousSecretHash).toBe(REDACTED);
+    expect(output.previous_secret_hash).toBe(REDACTED);
+    expect(output.keep).toBe(1);
+  });
 });

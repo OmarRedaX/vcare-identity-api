@@ -3,7 +3,7 @@ title: Identity Service — Service Card
 owner: identity-team
 service: identity-service
 status: ready
-last_verified: 2026-10-04
+last_verified: 2026-10-08
 tags: [service-card, catalog, identity]
 related: [index, system-design, runbook, data-model, api, design-baseline, deployment]
 sync_to_hub: catalog/identity-service.card.md
@@ -19,7 +19,7 @@ sync_to_hub: catalog/identity-service.card.md
 | **Name** | identity-service |
 | **Repo** | `vcare-identity-api` |
 | **Owner** | identity-team |
-| **Status** | `foundation` + `auth` built, tested and reviewed (2026-10-04): both listeners, health probes, and the whole public auth surface — registration, login, refresh rotation with reuse detection, logout, password reset by 6-digit code, change password, own profile, JWKS — plus the outbox email worker and retention purges. `users` (admin) and `/internal/*` are contract-only. All accepted contract changes are applied |
+| **Status** | `foundation` + `auth` built, tested and reviewed (2026-10-04); `users` (admin) built, tested, QA'd and reviewed (2026-10-07): both listeners, health probes, and the whole public auth surface — registration, login, refresh rotation with reuse detection, logout, password reset by 6-digit code, change password, own profile, JWKS — plus the outbox email worker and retention purges, and the admin `users` surface (list/get, patient suspend/reinstate with status history, session list/revoke). `service-auth` built, tested, QA'd and reviewed (2026-10-08): `POST /internal/auth/token` (client credentials, 300 s EdDSA service tokens, 30/min per IP and 60/min per client), the service guard, and ops-provisioned `service_clients` with secret rotation. `internal-users` (`GET /internal/users`, `PATCH /internal/users/{id}/status`) is still contract-only. All accepted contract changes are applied |
 | **Tier** | 1 — if it is down, nobody can log in or refresh. Target 99.95 % monthly (ADR 0009) |
 | **Runtime** | Node.js 24 LTS + TypeScript, Express 5; one image, deployed as `identity-api` (public `PORT` 3000 + internal `INTERNAL_PORT` 3100) and `identity-worker` (outbox + purges) on managed containers (hub ADR 0007) |
 | **Datastores** | PostgreSQL (own identity database, Multi-AZ); Redis (rate limits, idempotency — **Tier 2**, degrades without outage, ADR 0008) |
@@ -49,22 +49,22 @@ documents, or any clinical data (care-service).
 | care-service | `PATCH /internal/users/{id}/status` | Case 1 — verification decision activates or rejects a doctor account; `pending` when Care re-opens a rejected application | retry on timeout/5xx; `409 InvalidStatusTransition` is non-retryable |
 | care-service | `PATCH /internal/users/{id}/status` | Case 3 — suspension revokes all sessions | must not degrade: retry until success + alert; `409` (target not `active`) → alert, no retry |
 | care-service | `GET /internal/users?ids=` | Case 2 — batch profile hydration (≤ 100 ids) | degrade to cached profiles |
-| care-service | `POST /internal/auth/token` | obtain a 300 s service token | — |
+| care-service | `POST /internal/auth/token` | obtain a 300 s service token (30/min per IP, 60/min per client; production needs `INTERNAL_TRUST_PROXY_HOPS >= 1`) | cache the token, re-exchange about 60 s before expiry, honour `Retry-After` on `429` |
 | care-service, web clients | `GET /.well-known/jwks.json` | verify user access tokens locally | cache keys 5 min |
 | ai-service (Phase 2, future) | `POST /internal/auth/token` | token issuance for a new service client with its own scopes (first holder of `doctors:read`, which no MVP client holds) | — |
 | web clients | `/api/auth/*`, `/api/users/*` (single origin, hub ADR 0005) | end-user auth and admin user management (patients only for status) | — |
 
 ## Endpoint families
-Implemented today: **auth**, **keys**, **health**. `users` (admin) and the two internal families are
-contract-only until their modules are built.
+Implemented today: **auth**, **users** (admin), **keys**, **service-auth**, **health**. The `internal-users` family
+is contract-only until its module is built.
 
 | Family | Paths | Listener |
 |---|---|---|
 | auth (built) | `/api/auth/register/start`, `register/complete`, `login`, `refresh`, `logout`, `forgot-password`, `reset-password`, `change-password`, `me` | public |
-| users (admin) | `/api/users`, `/api/users/{id}`, `/api/users/{id}/status`, `/api/users/{id}/sessions` | public |
+| users (admin, built) | `/api/users`, `/api/users/{id}`, `/api/users/{id}/status`, `/api/users/{id}/sessions` | public |
 | keys (built) | `/.well-known/jwks.json` | public |
-| service-auth | `/internal/auth/token` | internal |
-| internal-users | `/internal/users`, `/internal/users/{id}/status` | internal |
+| service-auth (built) | `/internal/auth/token` | internal |
+| internal-users (contract-only) | `/internal/users`, `/internal/users/{id}/status` | internal |
 | health (built) | `/api/health/live`, `/api/health/ready`, `/internal/health/live`, `/internal/health/ready` — load balancers only, not routed by the edge | both |
 
 ## Events

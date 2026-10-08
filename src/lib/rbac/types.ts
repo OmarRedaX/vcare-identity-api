@@ -4,12 +4,15 @@
  * unit test, so the two can never drift (spec §3.1).
  */
 export type Role = "patient" | "doctor" | "admin";
+
+/** Scopes a service token can carry; equal to `SERVICE_SCOPES` and the `service_clients` CHECK. */
+export type ServiceScope = "users:read" | "users:status:write" | "doctors:read";
 export type AccountStatus = "pending" | "active" | "suspended" | "rejected";
 
 /**
  * Deny by default (CLAUDE.md -> Authorization — RBAC and ownership). Roles are always listed explicitly;
  * there is no "any authenticated user" wildcard, so a new role gets no access until a policy names it
- * (ADR 0010). Epic B adds `{ kind: "service"; scope: string; owner: "none" }`.
+ * (ADR 0010). The `service` kind guards `/internal/*` routes by scope (spec section 3.4).
  */
 export type Policy =
   /** No principal at all (registration, login, password flows, JWKS). */
@@ -20,6 +23,8 @@ export type Policy =
    * logout and `authorize` never evaluates roles for this kind.
    */
   | { kind: "refresh-cookie"; owner: "refresh-family" }
+  /** A verified service token (`serviceGuard`) carrying `scope`; there is no ownership on internal routes. */
+  | { kind: "service"; scope: ServiceScope; owner: "none" }
   /** A verified user access token; `self` routes take no id and act only on `req.auth.userId`. */
   | {
       kind: "user";

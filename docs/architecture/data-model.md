@@ -4,9 +4,9 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: reference
-last_verified: 2026-09-15
+last_verified: 2026-10-08
 tags: [architecture, data-model, postgresql, schema, indexes]
-related: [system-design, overview, auth-tokens, service-auth, adr-0001-no-orm-knex-raw-sql, design-baseline, capacity, adr-0006-email-first-registration-otp, adr-0007-transactional-outbox-worker]
+related: [system-design, overview, auth-tokens, service-auth, adr-0022-service-client-rotation-window-timing, adr-0001-no-orm-knex-raw-sql, design-baseline, capacity, adr-0006-email-first-registration-otp, adr-0007-transactional-outbox-worker]
 ---
 
 # Data Model
@@ -111,6 +111,8 @@ erDiagram
         varchar client_id
         varchar name
         varchar client_secret_hash
+        varchar previous_secret_hash
+        timestamptz previous_secret_expires_at
         text_array allowed_scopes
         text_array allowed_audiences
         boolean is_active
@@ -184,7 +186,8 @@ One row per issued refresh token. A **family** is the chain of rotations started
 | Index | Definition | Query it serves |
 |---|---|---|
 | `uq_refresh_tokens_token_hash` | `UNIQUE (token_hash)` | refresh/logout lookup `WHERE token_hash = $1` (includes revoked rows so reuse is detectable) |
-| `idx_refresh_tokens_user_id_live` | `(user_id, created_at DESC) WHERE revoked_at IS NULL` | revoke all families for a user (suspension, reset, admin `DELETE /sessions`) `UPDATE … WHERE user_id = $1 AND revoked_at IS NULL`; `GET /api/users/{id}/sessions` |
+| `idx_refresh_tokens_user_id_live` | `(user_id) WHERE revoked_at IS NULL` | `GET /api/users/{id}/sessions` (live tokens of one user); also the live-row part of revoke-all `UPDATE … WHERE user_id = $1 AND revoked_at IS NULL` (as built in `20261007000200`) |
+| `idx_refresh_tokens_family_id_created_at` | `(family_id, created_at, id)` | session `createdAt`: earliest retained token of a family, `ORDER BY created_at, id LIMIT 1` (`GET /api/users/{id}/sessions`) |
 | `idx_refresh_tokens_family_id_live` | `(family_id) WHERE revoked_at IS NULL` | revoke a family (logout, reuse detection) `UPDATE … WHERE family_id = $1 AND revoked_at IS NULL` |
 | `idx_refresh_tokens_replaced_by_id` | `(replaced_by_id) WHERE replaced_by_id IS NOT NULL` | covers `fk_refresh_tokens_replaced_by_id` |
 | `idx_refresh_tokens_expires_at` | `(expires_at)` | background purge of rows expired beyond retention `WHERE expires_at < $1` |
@@ -265,24 +268,30 @@ Registered callers of `/internal/*`. Provisioned by an ops procedure, never via 
 |---|---|---|---|
 | `id` | `BIGSERIAL` | no | `PRIMARY KEY` |
 | `client_id` | `VARCHAR(64)` | no | e.g. `care-service`; `chk_service_clients_client_id` (`client_id ~ '^[a-z][a-z0-9-]{2,63}$'`); unique among live rows |
-| `name` | `VARCHAR(120)` | no | human label |
-| `client_secret_hash` | `VARCHAR(255)` | no | argon2id; plaintext shown once at provisioning |
-| `allowed_scopes` | `TEXT[]` | no | `chk_service_clients_allowed_scopes` (`allowed_scopes <@ ARRAY['users:read','users:status:write','doctors:read']::text[]`) |
-| `allowed_audiences` | `TEXT[]` | no | e.g. `{vcare-identity,vcare-care}` |
-| `is_active` | `BOOLEAN` | no | disabled clients get `401 InvalidCredentials` |
-| `secret_rotated_at` | `TIMESTAMPTZ` | yes | |
-| `last_used_at` | `TIMESTAMPTZ` | yes | updated at most once per minute per client (outside the hot path budget) |
+| `name` | `VARCHAR(120)` | no | human label; `chk_service_clients_name_not_blank` (`length(btrim(name)) > 0`) |
+| `client_secret_hash` | `VARCHAR(255)` | no | argon2id; plaintext shown once at provisioning; `chk_service_clients_secret_hash_argon2id` (`LIKE '$argon2id$%'`) |
+| `previous_secret_hash` | `VARCHAR(255)` | yes | the superseded argon2id hash during a rotation overlap; `chk_service_clients_previous_hash_argon2id` (NULL or `LIKE '$argon2id$%'`) |
+| `previous_secret_expires_at` | `TIMESTAMPTZ` | yes | end of the overlap; `chk_service_clients_previous_secret_pair` (`(previous_secret_hash IS NULL) = (previous_secret_expires_at IS NULL)`) |
+| `allowed_scopes` | `TEXT[]` | no | `chk_service_clients_allowed_scopes` (`allowed_scopes <@ ARRAY['users:read','users:status:write','doctors:read']::text[]`); `chk_service_clients_allowed_scopes_nonempty` (`cardinality(allowed_scopes) >= 1`) |
+| `allowed_audiences` | `TEXT[]` | no | e.g. `{vcare-identity,vcare-care}`; `chk_service_clients_allowed_audiences_shape` (non-empty, every element `vcare-[a-z0-9-]+`, no NULL elements) |
+| `is_active` | `BOOLEAN` | no | no default (provisioning SQL sets it); disabled clients get `401 InvalidCredentials`; tokens already issued live until `exp` (<= 300 s) |
+| `secret_rotated_at` | `TIMESTAMPTZ` | yes | set by `--rotate` |
+| `last_used_at` | `TIMESTAMPTZ` | yes | updated at most once per minute per client, asynchronously after the response (outside the hot path budget) |
 | `created_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
-| `updated_at` | `TIMESTAMPTZ` | no | `DEFAULT now()` |
-| `deleted_at` | `TIMESTAMPTZ` | yes | soft delete |
+| `updated_at` | `TIMESTAMPTZ` | no | `DEFAULT now()`; ops statements set it explicitly |
+| `deleted_at` | `TIMESTAMPTZ` | yes | soft delete; frees the `client_id` |
 
 | Index | Definition | Query it serves |
 |---|---|---|
 | `uq_service_clients_client_id` | `UNIQUE (client_id) WHERE deleted_at IS NULL` | `POST /internal/auth/token` lookup `WHERE client_id = $1 AND deleted_at IS NULL` |
 
-During secret rotation a client may hold two valid hashes; see
-[service-auth.md](./service-auth.md) — the second hash is `previous_secret_hash VARCHAR(255) NULL` with
-`previous_secret_expires_at TIMESTAMPTZ NULL`, both cleared when the overlap ends.
+During secret rotation a client holds two valid hashes (`previous_secret_hash` with
+`previous_secret_expires_at`, set and cleared together). The token endpoint accepts the previous hash only while
+`previous_secret_expires_at` is in the future; an expired pair is simply ignored (it is not auto-cleared; the next
+`--rotate` overwrites it). See [service-auth.md](./service-auth.md) section 8 and ADR 0022. Application code only
+reads the table and touches `last_used_at`; rows are created, rotated and disabled by ops SQL
+(`scripts/provision-service-client.ts`, [runbook.md](../runbook.md)). Built by migration
+`20261007000300_create_service_clients`.
 
 ## `user_status_changes`
 Append-only history of every change to `users.status`, written **in the same transaction** as the change.

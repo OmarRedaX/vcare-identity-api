@@ -23,4 +23,12 @@ export const TOKENS = {
   PurgeService: Symbol.for("PurgeService"),
   AuthController: Symbol.for("AuthController"),
   JwksController: Symbol.for("JwksController"),
+
+  // ── users ──
+  UsersService: Symbol.for("UsersService"),
+  UsersController: Symbol.for("UsersController"),
+
+  // -- service-auth --
+  ServiceAuthService: Symbol.for("ServiceAuthService"),
+  ServiceAuthController: Symbol.for("ServiceAuthController"),
 } as const;

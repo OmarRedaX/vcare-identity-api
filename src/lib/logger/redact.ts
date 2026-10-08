@@ -19,6 +19,8 @@ export const REDACTED_KEYS: readonly string[] = [
   "client_secret",
   "clientSecret",
   "clientSecretHash",
+  "previousSecretHash",
+  "secretHash",
   "tokenHash",
   "codeHash",
   // One-time secrets (ADR 0006, ADR 0017). `code` is deliberately absent: it would hide AppError.code in

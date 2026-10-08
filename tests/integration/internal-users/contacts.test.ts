@@ -233,7 +233,7 @@ describe("GET /internal/users/contacts: privacy and performance", () => {
     expect(logs.text()).not.toContain("424242");
   });
 
-  it("should serve the lookup from the primary key with one ANY(array) condition", async () => {
+  it("should serve the lookup from an index on id with one ANY(array) condition, never a sequential scan", async () => {
     const plan = await db.transaction(async (trx) => {
       await trx.raw("SET LOCAL enable_seqscan = off");
       return trx.raw<{ rows: Record<string, string>[] }>(
@@ -242,7 +242,9 @@ describe("GET /internal/users/contacts: privacy and performance", () => {
       );
     });
 
-    expect(plan.rows.map((row) => Object.values(row)[0]).join("\n")).toContain("users_pkey");
+    const text = plan.rows.map((row) => Object.values(row)[0]).join("\n");
+    expect(text).toContain("Index Cond: (id = ANY");
+    expect(text).not.toContain("Seq Scan");
   });
 
   it("should answer a 100-id request with p95 under the 50 ms budget", async () => {

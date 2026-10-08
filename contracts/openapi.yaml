@@ -807,8 +807,12 @@ paths:
       summary: Batch user profile lookup (Integration Case 2)
       description: |
         One query: `WHERE id = ANY($1) AND deleted_at IS NULL`. 1..100 comma-separated ids (more →
-        `400 ValidationFailed`). Unknown or soft-deleted ids are **omitted**, not errors; order of `data` is not
-        guaranteed. Returns no email or phone. No outbound calls. Budget p95 < 50 ms for 100 ids.
+        `400 ValidationFailed`). Duplicate ids are accepted and collapsed before the query (`ids=1,1` returns one
+        row); the 100 cap counts entries as sent, before de-duplication, so 101 entries is a `400` even when they
+        are not all distinct. The scope is checked before the query string is validated (a token without
+        `users:read` gets `403 InsufficientScope` even for a malformed `ids`). Unknown or soft-deleted ids are
+        **omitted**, not errors; order of `data` is not guaranteed. Returns no email or phone. No outbound calls.
+        Budget p95 < 50 ms for 100 ids.
       security:
         - serviceToken: []
       x-roles: [service]
@@ -862,7 +866,9 @@ paths:
         deliver a notification (hub ADR 0010, identity ADR 0024). **PII-bearing**: the response carries `email`,
         so it is `Cache-Control: no-store`, the caller must hold it in memory for one batch only (never cache,
         store or log it), and Identity logs the scope use and the id count, never an address. **No phone**, ever.
-        One query: `WHERE id = ANY($1) AND deleted_at IS NULL`. Unknown or soft-deleted ids are **omitted**, not
+        One query: `WHERE id = ANY($1) AND deleted_at IS NULL`. Duplicate ids are accepted and collapsed before the
+        query; the 100 cap counts entries as sent, before de-duplication (101 entries is a `400`). The scope is
+        checked before the query string is validated. Unknown or soft-deleted ids are **omitted**, not
         errors; order of `data` is not guaranteed. Requires scope `users:contact:read`, which only the
         `care-service` client can hold (a `CHECK` on `service_clients` and the provisioning script refuse it for
         any other client). No outbound calls. Budget p95 < 50 ms for 100 ids.
@@ -965,7 +971,24 @@ paths:
                       data: { $ref: '#/components/schemas/StatusChangeResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/ServiceTokenRequired' }
-        '403': { $ref: '#/components/responses/InsufficientScope' }  # also `Forbidden` for a non-doctor target (ADR 0025); same envelope
+        '403':
+          description: >-
+            `InsufficientScope` (the token lacks `users:status:write`, checked before the body is validated) or
+            `Forbidden` (the target is a patient or an admin, ADR 0025; non-retryable). Same error envelope.
+          headers:
+            X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+              examples:
+                InsufficientScope:
+                  value:
+                    success: false
+                    error: { code: InsufficientScope, message: Token lacks the required scope, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
+                Forbidden:
+                  value:
+                    success: false
+                    error: { code: Forbidden, message: You are not allowed to perform this action, details: [], requestId: 7f1c2a9e-3b4d-4e5f-8a6b-1c2d3e4f5a6b }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/InvalidStatusTransition' }
         '500': { $ref: '#/components/responses/InternalError' }

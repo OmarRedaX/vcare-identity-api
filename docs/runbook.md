@@ -17,8 +17,9 @@ all logins and refreshes platform-wide, and blocks Care's Case 3 suspensions (Ca
 > Status (2026-10-08): the `foundation`, `auth`, `users` and `service-auth` modules are built — health probes,
 > graceful shutdown, structured logs, the Redis-down behaviour, the auth flows, the outbox worker, the admin
 > status/session routes, and the service-client token endpoint and provisioning scripts used below are real.
-> `internal-users` (`/internal/users`, `/internal/users/{id}/status`) is not built yet: its alerts and procedures are
-> the contract for the ops work done when that module lands.
+> `internal-users` (`/internal/users`, `/internal/users/contacts`, `/internal/users/{id}/status`) is built too; its alerts and
+> procedures below are live. The database must have migration `20261008000100` applied (`npm run migrate`) before
+> `care-service` can be provisioned with `users:contact:read`; without it Case 5 cannot be exercised.
 
 ## At a glance
 | | |
@@ -41,12 +42,15 @@ all logins and refreshes platform-wide, and blocks Care's Case 3 suspensions (Ca
 | `RefreshReuseSpike` | `refresh_token_reuse_detected` > 20 in 5 min (or > 5× baseline) | stolen refresh tokens being replayed; or a client bug sending concurrent refreshes with the same cookie | group logs by `userId` and `route`; if concentrated on few users → treat as account compromise, revoke their sessions (below) and notify security; if spread across a client version → client bug, escalate to the web team. Families are already revoked automatically. |
 | `AuthFailureSpike` | `401` rate on login > 5× baseline, or `InvalidCredentials` > 500/min | credential stuffing, brute force | confirm limiters are active (Redis healthy); identify top source IPs from ingress logs; block at ingress/WAF; watch for successful logins from the same sources and revoke those sessions |
 | `InternalUsersLatencyHigh` | `/internal/users` p95 > 50 ms for 10 min | missing/unused index after a migration, large `ids` batches, DB contention, pool exhaustion | `EXPLAIN` the `id = ANY($1)` query; check pool saturation and slow-query log; Care degrades to cached profiles (Case 2) so this is not user-facing yet — fix before it becomes an outage |
+| `StatusChangeActorUnknown` | any `status_change_actor_unknown` warn log (ids only) | Care sent an `actorUserId` that does not exist in `users` (Care bug, wrong environment, or id drift); the status change succeeded and the history row stores `actor_user_id = NULL` (`actor_service` and `request_id` are kept) | the line carries the unknown `actorUserId` (the `requestId` is on the line through the request context); find the row with `SELECT user_id, from_status, to_status, actor_service FROM user_status_changes WHERE request_id = '<id>';`, ask care-service on-call which admin acted, and fix the id mapping on Care's side. Nothing to retry |
 | `JwksUnavailable` | `/.well-known/jwks.json` non-200 or empty `keys` from synthetic probe for 2 min | bad `JWT_PRIVATE_KEYS` deploy, process crash loop, ingress misroute | check the latest deploy and env validation errors at boot; roll back the config; consumers keep their cached JWKS for 5 min — after that, Care rejects every token |
 | `HealthCheckFailing` | readiness 503 for 2 min | Postgres unreachable, or tasks stuck in shutdown (the probe has its own connection, so request-pool saturation alone does not fail readiness) | read `checks` in the body (`database: down` vs. shutdown with both `up`) and the `readiness_failed` warn log (`checks`, `shuttingDown`); check DB connectivity, credentials, and a Multi-AZ failover in progress; a shutdown that overruns `SHUTDOWN_TIMEOUT_MS` logs `shutdown_timeout` with `unfinishedRequests`. Redis alone never fails readiness (ADR 0014). During a Postgres outage Knex also logs `knex_warn` lines (`detail: Acquire connection error …`) — expected, not a second incident |
 | `RateLimiterDegraded` | `rate_limiter_degraded` for 2 min | Redis unreachable or failing over | check managed Redis status and `redis_error` / `redis_connect_failed` logs; readiness shows `redis: down` with 200 `degraded`; credential routes run on stricter per-task limits (ADR 0008) and idempotency is skipped (`idempotency_skipped`) — watch `AuthFailureSpike`, tighten WAF rules if an attack coincides. The client reconnects on its own; no restart needed. If Redis is connected but silent, look for `redis_breaker_open` (warn, once per trip) followed by a steady stream of `rate_limiter_degraded` / `idempotency_skipped` with no `redis_error`: the breaker is open and skips Redis for `REDIS_BREAKER_COOLDOWN_MS` (default 15 s), then logs `redis_breaker_half_open` and either `redis_breaker_closed` (recovered) or `redis_breaker_open` again (still unresponsive). Repeated open/half-open cycles mean Redis is wedged: fail over or restart it; the service needs no restart |
 | `OutboxLagHigh` | oldest pending outbox job > 2 min for 5 min | worker down, email provider slow/erroring, DB contention | check `identity-worker` task health and logs (`last_error` classes); scale worker to 2; if the provider is down, registration codes and resets are delayed — post a status notice |
 | `OutboxDeadJobs` | any job in `dead` | persistent provider rejection (bad address, auth) | `SELECT type, last_error, count(*) FROM outbox_jobs WHERE status='dead' GROUP BY 1,2;` fix the cause; re-queue with `UPDATE … SET status='pending', attempts=0, run_after=now()` via the audited ops console |
 | `DbPoolSaturated` (planned: pool metrics are not emitted yet) | pool wait p95 > 200 ms for 5 min | traffic spike, slow queries, too few tasks | check slow-query log and `EXPLAIN` hot paths; scale out `identity-api`; confirm purge batches are not running unthrottled |
+
+Additional signals (no page): `internal_users_read` and `internal_contacts_read` info logs carry `clientId`, `requested` and `returned` (after de-duplication) and never an id list or address; a `returned` far below `requested` for the contacts route means Care is asking for deleted or unknown users. `status_change_refused` (dimension `cause`: `transition`, `role` on the internal route; `self`, `admin`, `doctor` on the admin route) counts refused internal status calls: `role` means Care targeted a patient or admin (ADR 0025, `403 Forbidden`), `transition` means drift (`409`, non-retryable).
 
 Additional signal to watch (no page): `service_token_denied` warnings (metric of the same name, dimension `reason`) —
 a spike usually means a Care deploy with a rotated or wrong secret, or a user token sent to `/internal/*`. Treat
@@ -162,6 +166,10 @@ logs.
 2. Search logs for `requestId="<id>"` across `identity-service` and `care-service`; the id is shared.
 3. For status changes, the id is persisted: `SELECT user_id, from_status, to_status, actor_user_id, actor_service, created_at FROM user_status_changes WHERE request_id = '<id>';`
 4. Log lines never contain tokens, emails, or bodies — use `userId` / `clientId` to pivot.
+
+### Check a Case 4 reinstatement (doctor `suspended -> active`)
+`SELECT status, updated_at FROM users WHERE id = <id>;` must be `active`, and `user_status_changes` has one row with
+`actor_service = 'care-service'`. Old refresh tokens stay revoked by design; the doctor signs in again. A repeated call is a 200 no-op.
 
 ### Check whether Care's suspension landed (Case 3)
 `SELECT status, updated_at FROM users WHERE id = <id>;` then

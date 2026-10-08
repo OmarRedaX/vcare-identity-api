@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: accepted
 diataxis: explanation
-last_verified: 2026-10-04
+last_verified: 2026-10-08
 tags: [architecture, capacity, sizing, performance, storage]
 related: [system-design, design-baseline, deployment, data-model, adr-0003-argon2id-password-hashing, hub-capacity]
 ---
@@ -43,6 +43,7 @@ Peak rps = daily × 0.15 / 3600 × 2 (hub formula).
 | `POST /api/auth/refresh` | 150 k | **~12** | ~5 SQL statements (1 lookup, 1 user read, txn with 1 insert + 1 update) + 1 EdDSA sign |
 | `GET /api/auth/me` | 150 k | ~12 | 1 PK read (or token-only) |
 | `GET /internal/users` | 100 k | ~9 (20–50 ids each) | 1 `id = ANY($1)` PK query |
+| `GET /internal/users/contacts` | ~2 k (≤ 100 ids per care-worker outbox batch; hub TODO estimate ≈ 1–2 k calls/day) | < 0.1 | 1 `id = ANY($1)` PK query, narrow columns; measured p95 ≈ 8 ms for 100 ids locally (budget 50 ms) |
 | `POST /api/auth/login` | 10 k | ~1 normal, **~5 campaign** | **argon2id verify ≈ 50 ms CPU, 19 MiB** |
 | `register/start` + `register/complete` | ~2 k | < 1 | complete: 1 argon2id hash + 1 txn |
 | forgot/reset/change password | ~1 k | < 1 | argon2id on reset/change |
@@ -104,6 +105,7 @@ Responses < 2 KB; ~50 rps × 2 KB ≈ 100 KB/s. Negligible; the edge/WAF is size
 | Postgres | ~1 k qps, ~300 writes/s, ~100 conns | yes — 4–8 vCPU; add a connection proxy past ~10 tasks |
 | `refresh_tokens` | ~60 M rows / ~60 GB | yes, with **monthly partitioning** (drop partitions instead of purge) — needs its own ADR then |
 | `/internal/users` | ~90 rps | yes — PK lookups |
+| `/internal/users/contacts` | ~1 rps | yes — negligible, batched by Care's worker |
 | Redis | < 1 GB | yes |
 
 ## 8. Revisit triggers

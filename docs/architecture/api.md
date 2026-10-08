@@ -85,10 +85,10 @@ Notes
 - The four `200` responses carry `Cache-Control: no-store` (PII). Mutations re-read the acting admin's live row (a suspended or deleted admin is refused even with a valid token).
 - `GET /api/users` filters: `role`, `status`, `email` (exact, case-insensitive). Sort fixed at `created_at DESC, id DESC`.
 - Admin status body `{ status: "active" | "suspended", reason }`. Allowed: `active → suspended`, `suspended → active`.
-  Same status again → 200, no history row. Patient reinstatement (`suspended → active`) exists **only** on this
-  admin route.
+  Same status again → 200, no history row. Patient reinstatement (`suspended → active`) is done on this admin route.
 - A doctor target → `403 Forbidden` (ADR 0012, hub ADR 0006): doctor status changes only through Care via
-  `PATCH /internal/users/{id}/status`, so Care is never out of sync. Doctor reinstatement has no API path in MVP.
+  `PATCH /internal/users/{id}/status`, so Care is never out of sync. A doctor is reinstated by Care through the same internal route
+  (`suspended → active`, Case 4, [ADR 0023](../adr/0023-internal-status-accepts-suspended-to-active.md)).
 
 ## Tag: keys
 | Method + path | Roles | Ownership | Success | Error codes |
@@ -120,11 +120,18 @@ Body (JSON or form-encoded): `grant_type=client_credentials`, `client_id`, `clie
 | Method + path | Roles | Scope | Success | Error codes |
 |---|---|---|---|---|
 | `GET /internal/users?ids=1,2,3` | service | `users:read` | `200` `UserSummary[]` | `ValidationFailed` 400 (0 or > 100 ids, non-integer) · `ServiceTokenRequired` 401 (incl. any user token) · `InsufficientScope` 403 |
+| `GET /internal/users/contacts?ids=1,2,3` | service | `users:contact:read` (care-service only) | `200` `UserContact[]` `{ id, email, fullName, locale, status }` (`no-store`) | `ValidationFailed` 400 (0 or > 100 ids, non-integer) · `ServiceTokenRequired` 401 (incl. any user token) · `InsufficientScope` 403 |
 | `PATCH /internal/users/{id}/status` | service | `users:status:write` | `200` `StatusChangeResponse` `{ id, status, updatedAt }` | `ValidationFailed` 400 · `ServiceTokenRequired` 401 · `InsufficientScope` 403 · `NotFound` 404 · `InvalidStatusTransition` 409 |
 
 Notes
 - `/internal/users`: unknown and soft-deleted ids are omitted; `UserSummary` is
   `{ id, fullName, avatarUrl, role, status, timezone, locale }` — never email or phone.
+- `/internal/users/contacts` ([ADR 0024](../adr/0024-notification-contacts-lookup-and-scope.md), Case 5): one `id = ANY($1)` query over
+  live rows, unknown and soft-deleted ids omitted, **no phone**; the response carries email addresses, so it is
+  `Cache-Control: no-store`, the caller (care-worker) keeps it in memory for one batch only, and Identity logs counts, never addresses.
+- Internal status transitions: `pending → active | rejected`, `rejected → pending`, `active → suspended`,
+  `suspended → active` (Case 4, idempotent: already `active` → 200 with no history row). Entering `active` revokes
+  nothing and revives no refresh token. Any other pair → `409 InvalidStatusTransition` (non-retryable).
 - Internal status body `{ status: "active" | "rejected" | "pending" | "suspended", reason, actorUserId }`.
   Allowed: `pending → active|rejected` (Case 1), `rejected → pending` (Care re-opened a rejected
   application), `active → suspended` (Case 3). `suspended → active` is **not** allowed here (admin-only, public API).

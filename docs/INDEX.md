@@ -63,7 +63,7 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [adr/0009-availability-and-recovery-targets.md](./adr/0009-availability-and-recovery-targets.md) | the targets are 99.95 %, multi-AZ, with the stated RPO/RTO | explanation |
 | [adr/0010-manual-admin-provisioning-role-policies.md](./adr/0010-manual-admin-provisioning-role-policies.md) | admins are inserted manually and set their password via reset; policies list roles explicitly | explanation |
 | [adr/0011-pii-retained-on-soft-delete.md](./adr/0011-pii-retained-on-soft-delete.md) | soft-deleted accounts keep their PII in MVP (and when that is revisited) | explanation |
-| [adr/0012-doctor-status-only-via-care.md](./adr/0012-doctor-status-only-via-care.md) | the admin status route refuses doctor targets | explanation |
+| [adr/0012-doctor-status-only-via-care.md](./adr/0012-doctor-status-only-via-care.md) | the admin status route refuses doctor targets (its reinstatement clause is amended by ADR 0023) | explanation |
 | [adr/0013-log-derived-metrics.md](./adr/0013-log-derived-metrics.md) | metrics come from structured logs and there is no tracing SDK | explanation |
 | [adr/0014-health-liveness-readiness-split.md](./adr/0014-health-liveness-readiness-split.md) | health is split into liveness and readiness | explanation |
 | [adr/0015-foundation-runtime-dependencies.md](./adr/0015-foundation-runtime-dependencies.md) | `reflect-metadata` was added and there is no `cors`, `uuid`, or `dotenv` package (in-house CORS, `crypto.randomUUID`, Node env files) | explanation |
@@ -74,6 +74,8 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [adr/0020-refresh-rotation-versus-revocation-lock-order.md](./adr/0020-refresh-rotation-versus-revocation-lock-order.md) | why refresh rotation versus family/user-wide revocation needed one shared lock order, and how `users` implemented it (`rotate` uses `FOR SHARE`) | explanation |
 | [adr/0021-reason-field-not-redacted-in-logs.md](./adr/0021-reason-field-not-redacted-in-logs.md) | `reason` is not a logger redaction key and free-text status reasons are never logged | explanation |
 | [adr/0022-service-client-rotation-window-timing.md](./adr/0022-service-client-rotation-window-timing.md) | why the rotation-window double argon2id verify is an accepted timing residual and `secret_expired` is only a hint | explanation |
+| [adr/0023-internal-status-accepts-suspended-to-active.md](./adr/0023-internal-status-accepts-suspended-to-active.md) | why the internal status route accepts `suspended -> active` (Case 4, doctor reinstatement) | explanation |
+| [adr/0024-notification-contacts-lookup-and-scope.md](./adr/0024-notification-contacts-lookup-and-scope.md) | why the contacts lookup and the `users:contact:read` scope exist (Case 5) | explanation |
 
 ## Contract (source of truth — prose above derives from it)
 | Contract | Defines | Lens |

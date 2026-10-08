@@ -189,7 +189,8 @@ The token exchange (module `service-auth`) works today; the guarded `/internal/u
 
 Seed a local service client (local development only: the script refuses `NODE_ENV=production`, reads `DATABASE_URL`
 from `.env`, and upserts the live row, replacing its secret). Every argument is optional; the defaults are
-`--client-id care-service --name "Care service (local)" --scopes "users:read users:status:write" --audiences vcare-identity`:
+`--client-id care-service --name "Care service (local)" --scopes "users:read users:status:write users:contact:read" --audiences vcare-identity`
+(the contact scope is only ever allowed for `care-service`):
 ```bash
 npm run seed:service-client
 # prints client_id=care-service and a fresh client_secret=<secret>, once. Run it again to get a new secret.

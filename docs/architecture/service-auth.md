@@ -92,6 +92,7 @@ Signed with the same Ed25519 key set as user tokens and verifiable via `/.well-k
 |---|---|---|---|
 | `users:read` | `GET /internal/users?ids=` (batch summaries; no email/phone) | identity-service | care-service |
 | `users:status:write` | `PATCH /internal/users/{id}/status` | identity-service | care-service |
+| `users:contact:read` | `GET /internal/users/contacts?ids=` (email, name, locale, status; **no phone**) | identity-service | **care-service only** — `chk_service_clients_contact_scope_care_only` in the database and the provisioning scripts refuse it for any other client ([ADR 0024](../adr/0024-notification-contacts-lookup-and-scope.md)); used by `care-worker` only |
 | `doctors:read` | Care's `GET /internal/doctors/{userId}/summary` | care-service (Identity only issues it, with `aud=vcare-care`) | **no MVP service client holds it**; reserved for admin tooling and the Phase-2 ai-service once provisioned (hub `TODO.md`) |
 
 Scopes are coarse and resource-oriented. A new scope requires a contract change (here or in the

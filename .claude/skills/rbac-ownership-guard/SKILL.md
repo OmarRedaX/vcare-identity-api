@@ -126,6 +126,7 @@ router.<verb>(path,
 | `GET /users/:id/sessions`, `DELETE /users/:id/sessions` | admin | none | |
 | `GET /internal/users` | service | scope `users:read` | |
 | `PATCH /internal/users/:id/status` | service | scope `users:status:write` | |
+| `GET /internal/users/contacts` | service | scope `users:contact:read` (care-service only) | |
 | `POST /internal/auth/token` | client credentials | — | `publicRoute()` on the internal listener; secret verified in service |
 
 Policies list roles **explicitly** — never an "any authenticated user" wildcard — so a role added later gets no

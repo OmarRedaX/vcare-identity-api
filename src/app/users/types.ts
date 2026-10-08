@@ -4,7 +4,7 @@ import type { StatusCaller } from "./enums";
 
 /** Every non-entity type of the module (CLAUDE.md -> Module file conventions, item 11). */
 
-/** D-1: one transition method, two caller kinds; only `admin` is wired in this unit. */
+/** D-1: one transition method, two caller kinds. `actorUserId` of a service caller is recorded as data only. */
 export type StatusChangeCaller =
   | { kind: StatusCaller.Admin; actorUserId: number }
   | { kind: StatusCaller.Service; actorService: string; actorUserId: number };
@@ -28,7 +28,7 @@ export interface StatusChangeResult {
 /** A failed target rule of the status route: the error to throw and the cause to log. */
 export interface TargetRefusal {
   error: AppError;
-  cause: "self" | "admin" | "doctor";
+  cause: "self" | "admin" | "doctor" | "role";
 }
 
 // ── database row and insert shape ──

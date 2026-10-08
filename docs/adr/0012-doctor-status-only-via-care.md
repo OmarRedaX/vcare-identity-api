@@ -12,7 +12,7 @@ related: [design-baseline, api, landscape, adr-0004-rejected-doctors-can-sign-in
 
 # ADR 0012 — Identity's admin status route refuses doctor targets
 
-- **Status:** Accepted • **Date:** 2026-09-15 • **Deciders:** identity-team, with platform-team (hub ADR 0006)
+- **Status:** Accepted; its reinstatement clause is amended by [ADR 0023](./0023-internal-status-accepts-suspended-to-active.md) • **Date:** 2026-09-15 • **Deciders:** identity-team, with platform-team (hub ADR 0006)
 
 ## Context
 In the HTTP-only MVP, an admin changing a **doctor's** status through Identity's `PATCH /api/users/{id}/status`

@@ -72,11 +72,12 @@ via the audited ops console, with an incident ticket). Announce forced re-login 
 Clients are created by ops SQL, never by an API. `scripts/provision-service-client.ts` **prints** the SQL and never
 connects to a database. Run it from a checkout with dependencies installed, in an audited session.
 1. Open a ticket naming the client, its scopes and audiences (scopes: `users:read`, `users:status:write`,
-   `doctors:read`; audiences look like `vcare-identity`).
+   `doctors:read`, and `users:contact:read` for `care-service` only: the script and the table `CHECK` refuse it for any
+   other client, ADR 0024; audiences look like `vcare-identity`).
 2. Generate the SQL. The `INSERT` (argon2id hash only) goes to stdout, the plaintext secret goes **once** to stderr:
    ```bash
    npm run service-client:sql -- --client-id care-service --name "Care service" \
-     --scopes "users:read users:status:write" --audiences vcare-identity > new-client.sql
+     --scopes "users:read users:status:write users:contact:read" --audiences vcare-identity > new-client.sql
    ```
    Copy the secret from the stderr banner straight into the caller's secret manager. It is not stored anywhere else
    and cannot be recovered; if you lose it, rotate.
@@ -138,8 +139,11 @@ logs.
   `PATCH /api/users/<id>/status` with `{ "status": "suspended", "reason": "…" }`.
 - Remember the residual window: already-issued access tokens stay valid for up to 15 minutes.
 - Reinstating a **patient** (`suspended → active`) is admin-only via `PATCH /api/users/<id>/status`. Reinstating a
-  **doctor** has no API path in MVP: open an incident ticket and coordinate with care-service on-call to update both
-  services' databases through the audited ops console.
+  **doctor** happens in Care's admin console (Case 4): Care clears its local suspension and calls
+  `PATCH /internal/users/<id>/status` with `{ "status": "active" }` (ADR 0023); there is no two-database ops procedure. If Care
+  reports the sync as pending, the call is idempotent and safe to repeat; a `409 InvalidStatusTransition` means the
+  account is not `suspended` in Identity (drift): page care-service on-call and do not retry. The doctor's old refresh
+  tokens stay revoked, so they sign in again.
 
 ### Create an admin account (MVP manual procedure — ADR 0010)
 1. Open a ticket naming the person and approver. Use the audited ops DB session for the target environment.

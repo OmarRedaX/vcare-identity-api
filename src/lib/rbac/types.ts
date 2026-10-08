@@ -6,7 +6,11 @@
 export type Role = "patient" | "doctor" | "admin";
 
 /** Scopes a service token can carry; equal to `SERVICE_SCOPES` and the `service_clients` CHECK. */
-export type ServiceScope = "users:read" | "users:status:write" | "doctors:read";
+export type ServiceScope =
+  | "users:read"
+  | "users:status:write"
+  | "doctors:read"
+  | "users:contact:read";
 export type AccountStatus = "pending" | "active" | "suspended" | "rejected";
 
 /**

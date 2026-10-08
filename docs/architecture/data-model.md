@@ -272,7 +272,7 @@ Registered callers of `/internal/*`. Provisioned by an ops procedure, never via 
 | `client_secret_hash` | `VARCHAR(255)` | no | argon2id; plaintext shown once at provisioning; `chk_service_clients_secret_hash_argon2id` (`LIKE '$argon2id$%'`) |
 | `previous_secret_hash` | `VARCHAR(255)` | yes | the superseded argon2id hash during a rotation overlap; `chk_service_clients_previous_hash_argon2id` (NULL or `LIKE '$argon2id$%'`) |
 | `previous_secret_expires_at` | `TIMESTAMPTZ` | yes | end of the overlap; `chk_service_clients_previous_secret_pair` (`(previous_secret_hash IS NULL) = (previous_secret_expires_at IS NULL)`) |
-| `allowed_scopes` | `TEXT[]` | no | `chk_service_clients_allowed_scopes` (`allowed_scopes <@ ARRAY['users:read','users:status:write','doctors:read']::text[]`); `chk_service_clients_allowed_scopes_nonempty` (`cardinality(allowed_scopes) >= 1`) |
+| `allowed_scopes` | `TEXT[]` | no | `chk_service_clients_allowed_scopes` (`allowed_scopes <@ ARRAY['users:read','users:status:write','doctors:read','users:contact:read']::text[]`); `chk_service_clients_contact_scope_care_only` (`NOT ('users:contact:read' = ANY (allowed_scopes)) OR client_id = 'care-service'`, ADR 0024); `chk_service_clients_allowed_scopes_nonempty` (`cardinality(allowed_scopes) >= 1`) |
 | `allowed_audiences` | `TEXT[]` | no | e.g. `{vcare-identity,vcare-care}`; `chk_service_clients_allowed_audiences_shape` (non-empty, every element `vcare-[a-z0-9-]+`, no NULL elements) |
 | `is_active` | `BOOLEAN` | no | no default (provisioning SQL sets it); disabled clients get `401 InvalidCredentials`; tokens already issued live until `exp` (<= 300 s) |
 | `secret_rotated_at` | `TIMESTAMPTZ` | yes | set by `--rotate` |

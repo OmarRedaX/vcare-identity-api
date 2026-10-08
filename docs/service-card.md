@@ -48,6 +48,8 @@ documents, or any clinical data (care-service).
 |---|---|---|---|
 | care-service | `PATCH /internal/users/{id}/status` | Case 1 — verification decision activates or rejects a doctor account; `pending` when Care re-opens a rejected application | retry on timeout/5xx; `409 InvalidStatusTransition` is non-retryable |
 | care-service | `PATCH /internal/users/{id}/status` | Case 3 — suspension revokes all sessions | must not degrade: retry until success + alert; `409` (target not `active`) → alert, no retry |
+| care-service | `PATCH /internal/users/{id}/status` | Case 4 — reinstatement (`suspended → active`, ADR 0023); idempotent, already `active` → 200 | retry and report pending (Care's policy); `409` → alert, no retry |
+| care-service (care-worker) | `GET /internal/users/contacts?ids=` | Case 5 — notification recipients, scope `users:contact:read` (care-service only, ADR 0024); returns email, name, locale, status, no phone | delay: outbox rows stay pending with backoff; Care never caches, stores or logs the response |
 | care-service | `GET /internal/users?ids=` | Case 2 — batch profile hydration (≤ 100 ids) | degrade to cached profiles |
 | care-service | `POST /internal/auth/token` | obtain a 300 s service token (30/min per IP, 60/min per client; production needs `INTERNAL_TRUST_PROXY_HOPS >= 1`) | cache the token, re-exchange about 60 s before expiry, honour `Retry-After` on `429` |
 | care-service, web clients | `GET /.well-known/jwks.json` | verify user access tokens locally | cache keys 5 min |
@@ -56,7 +58,7 @@ documents, or any clinical data (care-service).
 
 ## Endpoint families
 Implemented today: **auth**, **users** (admin), **keys**, **service-auth**, **health**. The `internal-users` family
-is contract-only until its module is built.
+(status route with Case 4 reinstatement, contacts lookup) is built.
 
 | Family | Paths | Listener |
 |---|---|---|
@@ -64,7 +66,7 @@ is contract-only until its module is built.
 | users (admin, built) | `/api/users`, `/api/users/{id}`, `/api/users/{id}/status`, `/api/users/{id}/sessions` | public |
 | keys (built) | `/.well-known/jwks.json` | public |
 | service-auth (built) | `/internal/auth/token` | internal |
-| internal-users (contract-only) | `/internal/users`, `/internal/users/{id}/status` | internal |
+| internal-users | `/internal/users`, `/internal/users/contacts`, `/internal/users/{id}/status` | internal |
 | health (built) | `/api/health/live`, `/api/health/ready`, `/internal/health/live`, `/internal/health/ready` — load balancers only, not routed by the edge | both |
 
 ## Events

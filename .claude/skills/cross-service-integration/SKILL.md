@@ -41,7 +41,7 @@ lib/identity-client
   on 401 → drop cached token, fetch a new one, retry once
 ```
 
-Scopes: `users:read` (batch lookup) · `users:status:write` (status changes) · `doctors:read` (Care's `/internal/doctors/:userId/summary`, for admin tooling). The acting admin travels as data (`actorUserId` in the body) for the audit trail — it never grants authorization.
+Scopes: `users:read` (batch lookup) · `users:status:write` (status changes) · `users:contact:read` (notification contacts for Care's worker, care-service only, ADR 0024) · `doctors:read` (Care's `/internal/doctors/:userId/summary`, for admin tooling). The acting admin travels as data (`actorUserId` in the body) for the audit trail — it never grants authorization.
 
 ## The three integration cases
 

@@ -43,6 +43,15 @@ describe("parseProvisionArgs: new client", () => {
     });
   });
 
+  it("should grant users:contact:read to care-service and refuse it for any other client (ADR 0024)", () => {
+    const withContact = ["--name", "n", "--scopes", "users:read users:contact:read", "--audiences", "vcare-identity"];
+
+    expect((parseProvisionArgs(["--client-id", "care-service", ...withContact]) as NewClientArgs).scopes).toContain(
+      "users:contact:read",
+    );
+    expect(message(["--client-id", "ai-service", ...withContact])).toContain("--scopes");
+  });
+
   it("should de-duplicate scopes and audiences", () => {
     const parsed = parseProvisionArgs([
       "--client-id", "care-service", "--name", "Care service",
@@ -146,13 +155,24 @@ describe("SQL builders", () => {
 });
 
 describe("seed script arguments", () => {
-  it("should default to the local care-service client with users:read users:status:write for vcare-identity", () => {
+  it("should default to the local care-service client with its three scopes for vcare-identity", () => {
     expect(parseSeedArgs([])).toEqual({
       clientId: "care-service",
       name: "Care service (local)",
-      scopes: ["users:read", "users:status:write"],
+      scopes: ["users:read", "users:status:write", "users:contact:read"],
       audiences: ["vcare-identity"],
     });
+  });
+
+  it("should not default the contact scope for any other client id", () => {
+    expect(parseSeedArgs(["--client-id", "ai-service"]).scopes).toEqual(["users:read", "users:status:write"]);
+  });
+
+  it("should refuse users:contact:read for any client but care-service (ADR 0024)", () => {
+    expect(() => parseSeedArgs(["--client-id", "ai-service", "--scopes", "users:contact:read"])).toThrow(
+      "can only be granted to care-service",
+    );
+    expect(parseSeedArgs(["--scopes", "users:contact:read"]).scopes).toEqual(["users:contact:read"]);
   });
 
   it("should accept overrides and validate them with the same rules", () => {

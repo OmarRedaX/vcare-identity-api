@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: explanation
-last_verified: 2026-09-15
+last_verified: 2026-10-08
 tags: [architecture, future, roadmap, events, deferred]
 related: [system-design, service-auth, auth-tokens, api, design-baseline, deployment]
 ---
@@ -20,11 +20,11 @@ first by rule.
 Care knowing — is **closed by construction**: Identity's admin status route refuses doctor targets and doctor
 status changes only through Care ([ADR 0012](../adr/0012-doctor-status-only-via-care.md), hub ADR 0006).
 Events are still wanted for Care-side reactions to patient status changes, a future `user.registered` consumer,
-and for **doctor reinstatement**, which has no API path in MVP (ops procedure in both services).
+(doctor reinstatement now has an API path: Case 4, [ADR 0023](../adr/0023-internal-status-accepts-suspended-to-active.md)).
 
-**Reinstatement is not propagated (out of scope for MVP).** `suspended → active` for a doctor has no API path;
-the internal route rejects it and the admin route refuses doctor targets. A future design needs a Care-side
-reinstatement flow (Case-3-style failure policy) or a `user.status_changed` consumer.
+**Reinstatement is no longer deferred.** Care initiates it (Case 4, hub ADR 0009): the internal route accepts
+`suspended → active` ([ADR 0023](../adr/0023-internal-status-accepts-suspended-to-active.md), amending ADR 0012) and the
+admin route still refuses doctor targets. A `user.status_changed` consumer remains a future option.
 
 **Planned events** (also listed under `x-future-events` in the contract):
 

@@ -6,7 +6,14 @@ import type { Logger } from "../../../lib/logger/logger";
 import type { User } from "../entity/user.entity";
 import * as users from "../repository/user.repo";
 import type { AccountStatus } from "../../../lib/rbac/types";
-import type { UpdateProfileInput, UserListCursor, UserListFilter, UserListItem } from "../types";
+import type {
+  UpdateProfileInput,
+  UserContact,
+  UserSummary,
+  UserListCursor,
+  UserListFilter,
+  UserListItem,
+} from "../types";
 
 /**
  * The caller's own account, and the only way other modules reach the `users` table (spec §1.4).
@@ -56,6 +63,21 @@ export class AccountService {
     limit: number,
   ): Promise<UserListItem[]> {
     return users.listLive(filter, cursor, limit);
+  }
+
+  /** Existence including soft-deleted rows, inside the caller's transaction (FK-safe actor ids). */
+  existsIncludingDeleted(trx: Knex, userId: number): Promise<boolean> {
+    return users.existsIncludingDeleted(userId, trx);
+  }
+
+  /** Internal batch profile lookup (`internal-users`, Case 2); one query, unknown and soft-deleted ids omitted. */
+  findSummariesLive(ids: readonly number[]): Promise<UserSummary[]> {
+    return users.findSummariesByIds(ids);
+  }
+
+  /** Internal contact lookup (`internal-users`); one query, unknown and soft-deleted ids omitted. */
+  findContactsLive(ids: readonly number[]): Promise<UserContact[]> {
+    return users.findContactsByIds(ids);
   }
 
   /** Locks the live row `FOR UPDATE` inside the caller's transaction: the first lock of ADR 0019 / 0020. */

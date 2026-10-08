@@ -266,7 +266,7 @@ describe("serviceGuard", () => {
 });
 
 describe("SERVICE_SCOPES", () => {
-  it("should list exactly the three scopes the contract and CLAUDE.md define", () => {
-    expect([...SERVICE_SCOPES]).toEqual(["users:read", "users:status:write", "doctors:read"]);
+  it("should list exactly the four scopes the contract and CLAUDE.md define", () => {
+    expect([...SERVICE_SCOPES]).toEqual(["users:read", "users:status:write", "doctors:read", "users:contact:read"]);
   });
 });

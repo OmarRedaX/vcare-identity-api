@@ -1,5 +1,6 @@
 import { db } from "../../../src/lib/knex/knex";
 import { SERVICE_SCOPES } from "../../../src/lib/auth/constants";
+import * as contactScopeMigration from "../../../src/migrations/20261008000100_add_contact_scope_to_service_clients";
 import * as migration from "../../../src/migrations/20261007000300_create_service_clients";
 import { closeDb, truncateAll } from "../../helpers/db";
 import { hashSecret } from "../../helpers/service-clients";
@@ -79,6 +80,29 @@ describe("service_clients: CHECK constraints", () => {
     }
   });
 
+  it("should accept users:contact:read for care-service only (ADR 0024)", async () => {
+    await expect(
+      db("service_clients").insert(
+        await validRow({ allowed_scopes: ["users:read", "users:status:write", "users:contact:read"] }),
+      ),
+    ).resolves.toBeDefined();
+
+    for (const clientId of ["ai-service", "care-service-2", "admin-tool"]) {
+      await insertRejectedBy("chk_service_clients_contact_scope_care_only", {
+        client_id: clientId,
+        allowed_scopes: ["users:read", "users:contact:read"],
+      });
+    }
+  });
+
+  it("should refuse to widen an existing non-care client to the contact scope", async () => {
+    await db("service_clients").insert(await validRow({ client_id: "ai-service" }));
+
+    await expect(
+      db("service_clients").where("client_id", "ai-service").update({ allowed_scopes: ["users:contact:read"] }),
+    ).rejects.toMatchObject({ constraint: "chk_service_clients_contact_scope_care_only" });
+  });
+
   it("should accept several valid audiences", async () => {
     await expect(
       db("service_clients").insert(await validRow({ allowed_audiences: ["vcare-identity", "vcare-care-2"] })),
@@ -141,11 +165,36 @@ describe("20261007000300_create_service_clients: down", () => {
       "SELECT to_regclass('public.service_clients') AS exists",
     );
     await migration.up(db);
+    // The later migration's constraints live on the recreated table too; restore them for the other suites.
+    await contactScopeMigration.up(db);
     const recreated = await db.raw<{ rows: { exists: string | null }[] }>(
       "SELECT to_regclass('public.service_clients') AS exists",
     );
 
     expect(dropped.rows[0]?.exists).toBeNull();
     expect(recreated.rows[0]?.exists).toBe("service_clients");
+  });
+});
+
+describe("20261008000100_add_contact_scope_to_service_clients: down", () => {
+  it("should restore the three-scope vocabulary on down, dropping the scope from rows, and re-add it on up", async () => {
+    await db("service_clients").insert(
+      await validRow({ allowed_scopes: ["users:read", "users:contact:read"] }),
+    );
+
+    await contactScopeMigration.down(db);
+    const downScopes = await db("service_clients").select("allowed_scopes").first<{ allowed_scopes: string[] }>();
+    await expect(
+      db("service_clients").insert(await validRow({ client_id: "other-client", allowed_scopes: ["users:contact:read"] })),
+    ).rejects.toMatchObject({ constraint: "chk_service_clients_allowed_scopes" });
+
+    await contactScopeMigration.up(db);
+    await expect(
+      db("service_clients").insert(
+        await validRow({ client_id: "ai-service", allowed_scopes: ["users:contact:read"] }),
+      ),
+    ).rejects.toMatchObject({ constraint: "chk_service_clients_contact_scope_care_only" });
+
+    expect(downScopes.allowed_scopes).toEqual(["users:read"]);
   });
 });

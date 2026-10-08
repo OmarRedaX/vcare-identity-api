@@ -17,9 +17,9 @@ import type {
   UserListItem,
 } from "../../auth/types";
 import { StatusCaller } from "../enums";
-import { InvalidStatusTransition, TargetIsAdmin, TargetIsDoctor, TargetIsSelf } from "../errors";
+import { InvalidStatusTransition, TargetIsAdmin, TargetIsDoctor, TargetIsSelf, TargetNotDoctor } from "../errors";
 import * as statusChanges from "../repository/user-status-change.repo";
-import { ADMIN_TRANSITIONS } from "../status-transitions";
+import { ADMIN_TRANSITIONS, SERVICE_TRANSITIONS } from "../status-transitions";
 import type { StatusChangeCommand, StatusChangeResult, TargetRefusal } from "../types";
 
 /**
@@ -91,16 +91,20 @@ export class UsersService {
   }
 
   /**
-   * Admin caller only (spec D-1). Evaluation order: live-actor re-read, lock the target (404), target rules
-   * (403), same status (200 no-op), transition table (409), then write. One transaction.
+   * One transition method for both callers (spec D-1). Evaluation order: admin caller re-reads the live actor
+   * (D-5); lock the target (404); target rules (403: admin caller patients only, service caller doctors only,
+   * ADR 0025); same status (200 no-op); the caller's
+   * transition table (409); then write. Entering `suspended` or `rejected` revokes every refresh family; entering
+   * `active` revokes nothing and resurrects nothing (ADR 0023). One transaction.
    */
   async applyStatusChange(command: StatusChangeCommand): Promise<StatusChangeResult> {
     const { caller } = command;
-    if (caller.kind !== StatusCaller.Admin) {
-      // Wired by `internal-users` (Epic B) with its own transition table and target rules.
-      throw new Error("status_change_caller_not_supported");
+    const isAdmin = caller.kind === StatusCaller.Admin;
+    if (isAdmin) {
+      await this.requireLiveActor(caller.actorUserId);
     }
-    await this.requireLiveActor(caller.actorUserId);
+    const transitions = isAdmin ? ADMIN_TRANSITIONS : SERVICE_TRANSITIONS;
+    const actors = this.actorFields(command);
 
     const trx = await this.db.transaction();
     let result: StatusChangeResult;
@@ -112,28 +116,29 @@ export class UsersService {
         throw NotFound;
       }
 
-      const refusal = this.targetRefusal(target, caller.actorUserId);
+      const refusal = isAdmin
+        ? this.targetRefusal(target, caller.actorUserId)
+        : this.serviceTargetRefusal(target);
       if (refusal !== undefined) {
-        this.logger.warn("status_change_refused", {
-          actorUserId: caller.actorUserId,
-          userId: target.id,
-          cause: refusal.cause,
-        });
+        this.logger.warn("status_change_refused", { ...actors.log, userId: target.id, cause: refusal.cause });
         throw refusal.error;
       }
 
       const current = target.status as UserStatus;
       if (current === command.toStatus) {
+        if (!isAdmin && current === UserStatus.Suspended) {
+          // Case 3 retry: the status is already set, but the end state "no live refresh token" is re-asserted.
+          const revoked = await this.sessions.revokeAllForUser(trx, target.id, RevokedReason.StatusChanged);
+          await trx.commit();
+          this.logger.info("status_change_noop", { ...actors.log, userId: target.id, revokedSessions: revoked });
+          return { id: target.id, status: current, updatedAt: target.updatedAt, changed: false };
+        }
         await trx.rollback();
         return { id: target.id, status: current, updatedAt: target.updatedAt, changed: false };
       }
 
-      if (!ADMIN_TRANSITIONS[current].includes(command.toStatus)) {
-        this.logger.warn("status_change_refused", {
-          actorUserId: caller.actorUserId,
-          userId: target.id,
-          cause: "transition",
-        });
+      if (!transitions[current].includes(command.toStatus)) {
+        this.logger.warn("status_change_refused", { ...actors.log, userId: target.id, cause: "transition" });
         throw InvalidStatusTransition;
       }
 
@@ -143,20 +148,22 @@ export class UsersService {
         throw new Error("user_status_update_affected_no_row");
       }
 
+      const actorUserId = isAdmin ? caller.actorUserId : await this.recordableActor(trx, caller.actorUserId);
+
       await statusChanges.insertStatusChange(
         {
           userId: target.id,
           fromStatus: current,
           toStatus: command.toStatus,
-          actorUserId: caller.actorUserId,
-          actorService: null,
+          actorUserId,
+          actorService: actors.actorService,
           reason: command.reason,
           requestId: command.requestId,
         },
         trx,
       );
 
-      if (command.toStatus === UserStatus.Suspended) {
+      if (command.toStatus === UserStatus.Suspended || command.toStatus === UserStatus.Rejected) {
         revokedSessions = await this.sessions.revokeAllForUser(trx, target.id, RevokedReason.StatusChanged);
       }
 
@@ -170,13 +177,41 @@ export class UsersService {
 
     // Ids and statuses only: the free-text reason is never logged.
     this.logger.info("user_status_changed", {
-      actorUserId: caller.actorUserId,
+      ...actors.log,
       userId: result.id,
       from: fromStatus,
       to: command.toStatus,
       revokedSessions,
     });
     return result;
+  }
+
+  /**
+   * A service caller's `actorUserId` is recorded as data and never decides anything. `user_status_changes` has a
+   * foreign key to `users`, so an id that never existed would be a 500 that Care retries forever: it is stored as
+   * NULL instead (the row still has `actor_service`) and logged. Soft-deleted actors keep their row, so they count.
+   */
+  private async recordableActor(trx: Knex.Transaction, actorUserId: number): Promise<number | null> {
+    if (await this.accounts.existsIncludingDeleted(trx, actorUserId)) {
+      return actorUserId;
+    }
+    this.logger.warn("status_change_actor_unknown", { actorUserId });
+    return null;
+  }
+
+  /** `actor_service` for the history row (null for an admin) and the matching log fields. */
+  private actorFields(command: StatusChangeCommand): {
+    actorService: string | null;
+    log: Record<string, string | number>;
+  } {
+    const { caller } = command;
+    if (caller.kind === StatusCaller.Service) {
+      return {
+        actorService: caller.actorService,
+        log: { actorService: caller.actorService, actorUserId: caller.actorUserId },
+      };
+    }
+    return { actorService: null, log: { actorUserId: caller.actorUserId } };
   }
 
   /** The policy checks only the token claim (<= 15 min stale); mutations re-read the live actor row (D-5). */
@@ -188,6 +223,11 @@ export class UsersService {
     if (actor.isSuspended()) {
       throw AccountSuspended;
     }
+  }
+
+  /** ADR 0025 / BR-19: a service caller may change doctor accounts only; patients and admins are never reachable. */
+  private serviceTargetRefusal(target: User): TargetRefusal | undefined {
+    return target.role === "doctor" ? undefined : { error: TargetNotDoctor, cause: "role" };
   }
 
   /** Domain rule 6 / ADR 0012: patients only, never self. Checked before anything is written. */

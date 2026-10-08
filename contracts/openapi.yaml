@@ -927,6 +927,10 @@ paths:
         Every other pair → `409 InvalidStatusTransition`, which callers must treat as **non-retryable**
         (e.g. Case 3 on a target that is not `active`, or Case 4 on a target that is not `suspended`, signals drift:
         Care alerts instead of retrying).
+        **Doctor targets only (ADR 0025):** the target must be a live user with `role = doctor`; a patient or an admin
+        target → `403 Forbidden` (same code the public route uses for a doctor target), non-retryable. An absent or
+        soft-deleted target is `404 NotFound` and is checked first. `actorUserId` that does not exist is stored as
+        `NULL` in the history row and the call still succeeds (identity spec D-6).
         Entering `suspended` or `rejected` revokes **all** refresh-token families. The status update,
         revocation, and `user_status_changes` row (`actor_user_id` = body `actorUserId` recorded as data only,
         `actor_service` = token `sub`, `request_id`) commit in **one transaction**; only then 200.
@@ -936,7 +940,7 @@ paths:
       x-roles: [service]
       x-ownership: none
       x-scope: users:status:write
-      x-error-codes: [ValidationFailed, ServiceTokenRequired, InsufficientScope, NotFound, InvalidStatusTransition, InternalError]
+      x-error-codes: [ValidationFailed, ServiceTokenRequired, InsufficientScope, Forbidden, NotFound, InvalidStatusTransition, InternalError]
       parameters:
         - $ref: '#/components/parameters/RequestIdHeader'
         - $ref: '#/components/parameters/UserId'
@@ -961,7 +965,7 @@ paths:
                       data: { $ref: '#/components/schemas/StatusChangeResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/ServiceTokenRequired' }
-        '403': { $ref: '#/components/responses/InsufficientScope' }
+        '403': { $ref: '#/components/responses/InsufficientScope' }  # also `Forbidden` for a non-doctor target (ADR 0025); same envelope
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/InvalidStatusTransition' }
         '500': { $ref: '#/components/responses/InternalError' }

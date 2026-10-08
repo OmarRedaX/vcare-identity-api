@@ -443,6 +443,72 @@ describe("UsersService.applyStatusChange", () => {
       ).rejects.toMatchObject({ code: "NotFound" });
     });
 
+    it.each(["patient", "admin"] as const)(
+      "should throw Forbidden and write nothing when the service caller targets a %s (BR-19, ADR 0025)",
+      async (role) => {
+        accounts.lockLiveById.mockResolvedValue(user({ role, status: "active" }));
+
+        for (const toStatus of Object.values(UserStatus)) {
+          await expect(
+            service.applyStatusChange(command({ toStatus, caller: serviceCaller })),
+          ).rejects.toMatchObject({ code: "Forbidden", status: 403 });
+        }
+
+        expect(accounts.updateStatus).not.toHaveBeenCalled();
+        expect(accounts.existsIncludingDeleted).not.toHaveBeenCalled();
+        expect(statusChanges.insertStatusChange).not.toHaveBeenCalled();
+        expect(sessions.revokeAllForUser).not.toHaveBeenCalled();
+        expect(trx.commit).not.toHaveBeenCalled();
+        expect(trx.rollback).toHaveBeenCalled();
+      },
+    );
+
+    it("should refuse a non-doctor even when the requested status equals the current one, and log only ids and the cause", async () => {
+      accounts.lockLiveById.mockResolvedValue(user({ role: "patient", status: "suspended" }));
+
+      await expect(service.applyStatusChange(command({ caller: serviceCaller }))).rejects.toMatchObject({
+        code: "Forbidden",
+      });
+
+      expect(sessions.revokeAllForUser).not.toHaveBeenCalled();
+      const refused = sink.lines().find((line) => line.message === "status_change_refused");
+      expect(refused).toMatchObject({ cause: "role", userId: TARGET_ID, actorService: "care-service" });
+      expect(sink.text()).not.toContain(REASON);
+      expect(sink.text()).not.toContain("amira.patient@example.test");
+    });
+
+    it("should roll back without committing when the history insert fails for a service caller", async () => {
+      accounts.lockLiveById.mockResolvedValue(user({ role: "doctor", status: "active" }));
+      statusChanges.insertStatusChange.mockRejectedValue(new Error("connection lost"));
+
+      await expect(service.applyStatusChange(command({ caller: serviceCaller }))).rejects.toThrow("connection lost");
+
+      expect(sessions.revokeAllForUser).not.toHaveBeenCalled();
+      expect(trx.commit).not.toHaveBeenCalled();
+      expect(trx.rollback).toHaveBeenCalledTimes(1);
+      expect(sink.lines().map((line) => line.message)).not.toContain("user_status_changed");
+    });
+
+    it("should roll back without committing or logging success when the revocation fails for a service caller", async () => {
+      accounts.lockLiveById.mockResolvedValue(user({ role: "doctor", status: "active" }));
+      sessions.revokeAllForUser.mockRejectedValue(new Error("connection lost"));
+
+      await expect(service.applyStatusChange(command({ caller: serviceCaller }))).rejects.toThrow("connection lost");
+
+      expect(trx.commit).not.toHaveBeenCalled();
+      expect(trx.rollback).toHaveBeenCalledTimes(1);
+      expect(sink.lines().map((line) => line.message)).not.toContain("user_status_changed");
+    });
+
+    it("should not revoke when Care repeats a rejection that already landed", async () => {
+      accounts.lockLiveById.mockResolvedValue(user({ role: "doctor", status: "rejected" }));
+
+      const result = await service.applyStatusChange(command({ toStatus: UserStatus.Rejected, caller: serviceCaller }));
+
+      expect(result.changed).toBe(false);
+      expect(sessions.revokeAllForUser).not.toHaveBeenCalled();
+    });
+
     it("should log the service and ids but never the reason or any personal data", async () => {
       accounts.lockLiveById.mockResolvedValue(user({ role: "doctor", status: "suspended" }));
 

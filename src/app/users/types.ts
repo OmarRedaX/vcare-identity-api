@@ -28,7 +28,7 @@ export interface StatusChangeResult {
 /** A failed target rule of the status route: the error to throw and the cause to log. */
 export interface TargetRefusal {
   error: AppError;
-  cause: "self" | "admin" | "doctor";
+  cause: "self" | "admin" | "doctor" | "role";
 }
 
 // ── database row and insert shape ──

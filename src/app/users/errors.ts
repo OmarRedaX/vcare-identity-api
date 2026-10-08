@@ -23,6 +23,13 @@ export const TargetIsDoctor = new AppError(
   "Doctor account status is managed by care-service",
 );
 
+/** ADR 0025: the internal status route changes doctor accounts only. */
+export const TargetNotDoctor = new AppError(
+  "Forbidden",
+  403,
+  "Only doctor account status can be changed through this route",
+);
+
 export const InvalidStatusTransition = new AppError(
   "InvalidStatusTransition",
   409,

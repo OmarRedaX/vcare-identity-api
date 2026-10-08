@@ -17,7 +17,7 @@ import type {
   UserListItem,
 } from "../../auth/types";
 import { StatusCaller } from "../enums";
-import { InvalidStatusTransition, TargetIsAdmin, TargetIsDoctor, TargetIsSelf } from "../errors";
+import { InvalidStatusTransition, TargetIsAdmin, TargetIsDoctor, TargetIsSelf, TargetNotDoctor } from "../errors";
 import * as statusChanges from "../repository/user-status-change.repo";
 import { ADMIN_TRANSITIONS, SERVICE_TRANSITIONS } from "../status-transitions";
 import type { StatusChangeCommand, StatusChangeResult, TargetRefusal } from "../types";
@@ -92,7 +92,8 @@ export class UsersService {
 
   /**
    * One transition method for both callers (spec D-1). Evaluation order: admin caller re-reads the live actor
-   * (D-5); lock the target (404); admin target rules (403, patients only); same status (200 no-op); the caller's
+   * (D-5); lock the target (404); target rules (403: admin caller patients only, service caller doctors only,
+   * ADR 0025); same status (200 no-op); the caller's
    * transition table (409); then write. Entering `suspended` or `rejected` revokes every refresh family; entering
    * `active` revokes nothing and resurrects nothing (ADR 0023). One transaction.
    */
@@ -115,7 +116,9 @@ export class UsersService {
         throw NotFound;
       }
 
-      const refusal = isAdmin ? this.targetRefusal(target, caller.actorUserId) : undefined;
+      const refusal = isAdmin
+        ? this.targetRefusal(target, caller.actorUserId)
+        : this.serviceTargetRefusal(target);
       if (refusal !== undefined) {
         this.logger.warn("status_change_refused", { ...actors.log, userId: target.id, cause: refusal.cause });
         throw refusal.error;
@@ -220,6 +223,11 @@ export class UsersService {
     if (actor.isSuspended()) {
       throw AccountSuspended;
     }
+  }
+
+  /** ADR 0025 / BR-19: a service caller may change doctor accounts only; patients and admins are never reachable. */
+  private serviceTargetRefusal(target: User): TargetRefusal | undefined {
+    return target.role === "doctor" ? undefined : { error: TargetNotDoctor, cause: "role" };
   }
 
   /** Domain rule 6 / ADR 0012: patients only, never self. Checked before anything is written. */

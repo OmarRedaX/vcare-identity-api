@@ -15,6 +15,8 @@ related: [adr-0012-doctor-status-only-via-care, api, service-auth, hub-adr-0009]
 - **Status:** Accepted • **Date:** 2026-10-08 • **Deciders:** identity-team, with platform-team (hub ADR 0009)
 - **Amends:** [ADR 0012](./0012-doctor-status-only-via-care.md) — only its last Decision bullet ("Reinstating a suspended
   doctor has no API path in MVP"). Everything else in ADR 0012 stands.
+- **Amended by:** [ADR 0025](./0025-internal-status-route-doctor-targets-only.md) — the internal status route changes
+  doctor accounts only; the doctor-only rule is the decision carried forward (ADR 0023's "not role-gated" no longer holds).
 
 ## Context
 

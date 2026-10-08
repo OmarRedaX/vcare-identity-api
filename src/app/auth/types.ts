@@ -25,6 +25,23 @@ export interface UserRow {
   deleted_at: Date | null;
 }
 
+/** Narrow projection for the internal contact lookup (ADR 0024): no phone, no hash, no role. */
+export interface UserContactRow {
+  id: string | number;
+  email: string;
+  full_name: string;
+  locale: string;
+  status: string;
+}
+
+export interface UserContact {
+  id: number;
+  email: string;
+  fullName: string;
+  locale: string;
+  status: AccountStatus;
+}
+
 export interface RefreshTokenRow {
   id: string | number;
   user_id: string | number;

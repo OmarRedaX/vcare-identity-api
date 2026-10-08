@@ -5,6 +5,8 @@ import { User } from "../entity/user.entity";
 import type {
   NewUserRow,
   UpdateProfileInput,
+  UserContact,
+  UserContactRow,
   UserListCursor,
   UserListFilter,
   UserListItem,
@@ -94,6 +96,16 @@ export async function findLiveByIdForUpdate(id: number, conn: Knex): Promise<Use
 }
 
 /**
+ * True when a row with this id exists, soft-deleted or not (soft delete keeps the row, so a foreign key to it
+ * holds). Used to decide whether a caller-supplied actor id can be stored in `user_status_changes`.
+ * Index: primary key.
+ */
+export async function existsIncludingDeleted(id: number, conn: Knex = db): Promise<boolean> {
+  const row = await conn(TABLE).select("id").where("id", id).first<{ id: string | number } | undefined>();
+  return row !== undefined;
+}
+
+/**
  * The refresh rotation locks the user `FOR SHARE` before the token row (ADR 0019 / ADR 0020): it coexists
  * with other rotations of the same user but conflicts with every `FOR UPDATE` and row update, so it is
  * serialised against suspension, admin revoke, logout, reset and change-password. Index: primary key.
@@ -107,6 +119,25 @@ export async function findLiveByIdForShare(id: number, conn: Knex): Promise<User
     .first<UserRow | undefined>();
 
   return row === undefined ? undefined : toEntity(row);
+}
+
+/**
+ * `GET /internal/users/contacts` (ADR 0024): one query, `id = ANY($1)`, live rows only; unknown ids are simply
+ * absent. An explicit narrow column list, so a phone or a hash can never ride along. Index: primary key.
+ */
+export async function findContactsByIds(ids: readonly number[], conn: Knex = db): Promise<UserContact[]> {
+  const rows = await conn(TABLE)
+    .select(["id", "email", "full_name", "locale", "status"])
+    .whereRaw("id = ANY(?)", [ids as number[]])
+    .whereNull("deleted_at");
+
+  return (rows as UserContactRow[]).map((row) => ({
+    id: Number(row.id),
+    email: row.email,
+    fullName: row.full_name,
+    locale: row.locale,
+    status: row.status as AccountStatus,
+  }));
 }
 
 /**

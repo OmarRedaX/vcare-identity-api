@@ -34,6 +34,27 @@ export interface UserContactRow {
   status: string;
 }
 
+/** Narrow projection for the internal batch lookup (Case 2): display profile only, no email, phone or hash. */
+export interface UserSummaryRow {
+  id: string | number;
+  full_name: string;
+  avatar_url: string | null;
+  role: string;
+  status: string;
+  timezone: string;
+  locale: string;
+}
+
+export interface UserSummary {
+  id: number;
+  fullName: string;
+  avatarUrl: string | null;
+  role: Role;
+  status: AccountStatus;
+  timezone: string;
+  locale: string;
+}
+
 export interface UserContact {
   id: number;
   email: string;

@@ -9,12 +9,12 @@ import { sealRouter } from "../../lib/http/route-capture";
 import { authorize } from "../../lib/rbac/authorize";
 import type { Clock } from "../../lib/time/types";
 import type { InternalUsersController } from "./controller/internal-users.controller";
-import { internalContactsPolicy, internalStatusPolicy } from "./policies";
+import { internalBatchPolicy, internalContactsPolicy, internalStatusPolicy } from "./policies";
 
 /**
  * Per-route order: serviceGuard -> authorize(policy) -> handler. No idempotency middleware (a status PATCH to the
- * same status is idempotent by nature) and no limiter (the caller is one authenticated internal client). Both
- * responses are `Cache-Control: no-store`; the contacts response carries email addresses.
+ * same status is idempotent by nature) and no limiter (the caller is one authenticated internal client). The
+ * contacts and status responses are `Cache-Control: no-store`; the contacts response carries email addresses.
  */
 export function buildInternalUsersRouter(scope: DependencyContainer = rootContainer): Router {
   const controller = scope.resolve<InternalUsersController>(TOKENS.InternalUsersController);
@@ -24,6 +24,8 @@ export function buildInternalUsersRouter(scope: DependencyContainer = rootContai
 
   const router = Router();
 
+  // No no-store here: the batch shape carries no PII (the contract declares no Cache-Control).
+  router.get("/", guard, authorize(internalBatchPolicy), controller.batchGetUsers);
   router.get("/contacts", guard, authorize(internalContactsPolicy), noStore(), controller.getContacts);
   router.patch(
     "/:id/status",

@@ -9,6 +9,7 @@ import type { AccountStatus } from "../../../lib/rbac/types";
 import type {
   UpdateProfileInput,
   UserContact,
+  UserSummary,
   UserListCursor,
   UserListFilter,
   UserListItem,
@@ -67,6 +68,11 @@ export class AccountService {
   /** Existence including soft-deleted rows, inside the caller's transaction (FK-safe actor ids). */
   existsIncludingDeleted(trx: Knex, userId: number): Promise<boolean> {
     return users.existsIncludingDeleted(userId, trx);
+  }
+
+  /** Internal batch profile lookup (`internal-users`, Case 2); one query, unknown and soft-deleted ids omitted. */
+  findSummariesLive(ids: readonly number[]): Promise<UserSummary[]> {
+    return users.findSummariesByIds(ids);
   }
 
   /** Internal contact lookup (`internal-users`); one query, unknown and soft-deleted ids omitted. */

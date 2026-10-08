@@ -12,6 +12,8 @@ import type {
   UserListItem,
   UserListRow,
   UserRow,
+  UserSummary,
+  UserSummaryRow,
 } from "../types";
 
 /**
@@ -119,6 +121,27 @@ export async function findLiveByIdForShare(id: number, conn: Knex): Promise<User
     .first<UserRow | undefined>();
 
   return row === undefined ? undefined : toEntity(row);
+}
+
+/**
+ * `GET /internal/users` (Case 2): one query, `id = ANY($1)`, live rows only; unknown ids are simply absent.
+ * Explicit narrow column list: no email, phone or hash can ride along. Index: primary key.
+ */
+export async function findSummariesByIds(ids: readonly number[], conn: Knex = db): Promise<UserSummary[]> {
+  const rows = await conn(TABLE)
+    .select(["id", "full_name", "avatar_url", "role", "status", "timezone", "locale"])
+    .whereRaw("id = ANY(?)", [ids as number[]])
+    .whereNull("deleted_at");
+
+  return (rows as UserSummaryRow[]).map((row) => ({
+    id: Number(row.id),
+    fullName: row.full_name,
+    avatarUrl: row.avatar_url,
+    role: row.role as Role,
+    status: row.status as AccountStatus,
+    timezone: row.timezone,
+    locale: row.locale,
+  }));
 }
 
 /**

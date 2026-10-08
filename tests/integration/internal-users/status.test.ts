@@ -438,3 +438,81 @@ describe("PATCH /internal/users/:id/status: atomicity", () => {
     expect((await userRow(bystander.id)).status).toBe("suspended");
   });
 });
+
+describe("PATCH /internal/users/:id/status: Case 1 audit and Case 3 end to end", () => {
+  it("should activate a pending doctor and record the caller, the body actor and the adopted request id", async () => {
+    const doctor = await doctorWithStatus("pending", "case1.audit@example.test");
+    const requestId = uuid();
+
+    const response = await internalPatch(doctor.id, change("active"), writeToken, { "X-Request-Id": requestId });
+
+    expect(response.status).toBe(200);
+    expect(response.headers["x-request-id"]).toBe(requestId);
+    expectStatusChangePayload(expectSuccessEnvelope(response.body));
+    expect((await historyRows(doctor.id))[0]).toMatchObject({
+      from_status: "pending",
+      to_status: "active",
+      actor_service: "care-service",
+      request_id: requestId,
+      reason: REASON,
+    });
+  });
+
+  it("should fail a refresh with the old cookie and refuse a new login after a suspension (BR-14)", async () => {
+    const doctor = await doctorWithStatus("active", "case3.endtoend@example.test");
+    const first = await seedSession(doctor.id);
+    const second = await seedSession(doctor.id);
+
+    await internalPatch(doctor.id, change("suspended")).expect(200);
+
+    for (const session of [first, second]) {
+      const refresh = await request(apps.publicApp).post("/api/auth/refresh").set("Cookie", cookieFor(session.token));
+      expect(refresh.status).toBeGreaterThanOrEqual(401);
+      expect(refresh.status).toBeLessThanOrEqual(403);
+      expect(["RefreshTokenInvalid", "AccountSuspended"]).toContain((refresh.body as { error: { code: string } }).error.code);
+    }
+    const login = await request(apps.publicApp)
+      .post("/api/auth/login")
+      .send({ email: "case3.endtoend@example.test", password: TEST_PASSWORD });
+    expect(login.status).toBe(403);
+    expectErrorEnvelope(login.body, "AccountSuspended");
+    expect((await tokenRows(doctor.id)).every((row) => row.revoked_reason === "status_changed")).toBe(true);
+  });
+
+  it("should record a patient's id as the actor without treating it as authority (BR-3, BR-12)", async () => {
+    const doctor = await doctorWithStatus("suspended", "patient.actor.doctor@example.test");
+    const patientActor = await seedUser({ email: "patient.actor@example.test" });
+
+    const response = await internalPatch(doctor.id, change("active", { actorUserId: patientActor.id }));
+
+    expect(response.status).toBe(200);
+    expect((await historyRows(doctor.id))[0]?.actor_user_id).toBe(String(patientActor.id));
+  });
+
+  it("should leave the family revoked and no live token when a refresh races a suspension (BR-13)", async () => {
+    const doctor = await doctorWithStatus("active", "race.doctor@example.test");
+    const session = await seedSession(doctor.id);
+
+    const [suspension, refresh] = await Promise.all([
+      internalPatch(doctor.id, change("suspended")),
+      request(apps.publicApp).post("/api/auth/refresh").set("Cookie", cookieFor(session.token)),
+    ]);
+
+    expect(suspension.status).toBe(200);
+    expect([200, 401, 403]).toContain(refresh.status);
+    expect((await userRow(doctor.id)).status).toBe("suspended");
+    expect(await liveTokenCount(doctor.id)).toBe(0);
+  });
+
+  it("should expose no secret or hash in any status response body", async () => {
+    const doctor = await doctorWithStatus("suspended", "nosecret.doctor@example.test");
+
+    const ok = await internalPatch(doctor.id, change("active"));
+    const refused = await internalPatch(doctor.id, change("rejected"));
+
+    for (const response of [ok, refused]) {
+      expect(response.text).not.toMatch(/argon2|hash|nosecret\.doctor@example\.test/i);
+    }
+    expect(Object.keys(expectSuccessEnvelope(ok.body) as object).sort()).toEqual(["id", "status", "updatedAt"]);
+  });
+});

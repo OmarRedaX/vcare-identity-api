@@ -1,10 +1,14 @@
 import type { Request, Response } from "express";
 import type { AccountService } from "../../../../src/app/auth/service/account.service";
-import type { UserContact } from "../../../../src/app/auth/types";
+import type { UserContact, UserSummary } from "../../../../src/app/auth/types";
 import { InternalUsersController } from "../../../../src/app/internal-users/controller/internal-users.controller";
 import { InternalStatusChangeDto } from "../../../../src/app/internal-users/dto/internal-users.request.dto";
-import { UserContactResponseDto } from "../../../../src/app/internal-users/dto/internal-users.response.dto";
 import {
+  UserContactResponseDto,
+  UserSummaryResponseDto,
+} from "../../../../src/app/internal-users/dto/internal-users.response.dto";
+import {
+  internalBatchPolicy,
   internalContactsPolicy,
   internalStatusPolicy,
 } from "../../../../src/app/internal-users/policies";
@@ -255,5 +259,178 @@ describe("InternalUsersController", () => {
 
     expect(internal.getContacts).toHaveBeenCalledWith([9, 9], "care-service");
     expect(body()).toMatchObject({ success: true, data: [{ id: 9, email: "person9@example.test" }] });
+  });
+});
+
+function summary(id: number): UserSummary {
+  return {
+    id,
+    fullName: "Amira Hassan",
+    avatarUrl: null,
+    role: "doctor",
+    status: "active",
+    timezone: "Africa/Cairo",
+    locale: "ar-EG",
+  };
+}
+
+/** D-9 for GET /internal/users, driven through the controller exactly like the contacts route. */
+describe("GET /internal/users ids validation", () => {
+  const entries = (count: number): string => Array.from({ length: count }, (_v, index) => String(index + 1)).join(",");
+
+  function call(query: Record<string, unknown>): { run: () => Promise<void>; summaries: jest.Mock } {
+    const summaries = jest.fn().mockResolvedValue([]);
+    const controller = new InternalUsersController(
+      {} as UsersService,
+      { getSummaries: summaries } as unknown as InternalUsersService,
+    );
+    const res = { locals: {}, status: () => res, json: () => res, req: { baseUrl: "/internal/users", route: { path: "/" } } };
+    const req = { requestId: REQUEST_ID, params: {}, query, body: {}, auth: SERVICE } as unknown as Request;
+    return { run: () => controller.batchGetUsers(req, res as unknown as Response), summaries };
+  }
+
+  it("should parse comma-separated canonical ids into integers and pass the token client id", async () => {
+    const { run, summaries } = call({ ids: "3,1,2" });
+
+    await run();
+
+    expect(summaries).toHaveBeenCalledWith([3, 1, 2], "care-service");
+  });
+
+  it("should accept duplicate ids as sent and leave the collapsing to the service", async () => {
+    const { run, summaries } = call({ ids: "1,1" });
+
+    await run();
+
+    expect(summaries).toHaveBeenCalledWith([1, 1], "care-service");
+  });
+
+  it.each(["", "1,,2", "1,", "0", "-4", "1.5", "abc", "01", "9007199254740993", " 1", "1e3", "+1"])(
+    "should reject ids=%p with ValidationFailed on field ids and never query",
+    async (ids) => {
+      const { run, summaries } = call({ ids });
+
+      const error = await messageOf(run);
+
+      expect(error.code).toBe("ValidationFailed");
+      expect(error.details.some((detail) => detail.field === "ids")).toBe(true);
+      expect(summaries).not.toHaveBeenCalled();
+    },
+  );
+
+  it("should accept 100 entries and reject 101, counting entries as sent", async () => {
+    await expect(call({ ids: entries(100) }).run()).resolves.toBeUndefined();
+    await expect(call({ ids: entries(101) }).run()).rejects.toMatchObject({ code: "ValidationFailed" });
+    await expect(call({ ids: Array(101).fill("1").join(",") }).run()).rejects.toMatchObject({ code: "ValidationFailed" });
+  });
+
+  it("should reject a missing ids, a repeated ids key and an unknown parameter", async () => {
+    await expect(call({}).run()).rejects.toMatchObject({ code: "ValidationFailed" });
+    await expect(call({ ids: ["1", "2"] }).run()).rejects.toMatchObject({ code: "ValidationFailed" });
+    await expect(call({ ids: "1", fields: "email" }).run()).rejects.toMatchObject({ code: "ValidationFailed" });
+  });
+
+  it("should return the summaries through the response DTO and fail closed without a service principal", async () => {
+    const internal = { getSummaries: jest.fn().mockResolvedValue([summary(9)]) };
+    const controller = new InternalUsersController({} as UsersService, internal as unknown as InternalUsersService);
+    let payload: unknown;
+    const res = {
+      locals: {},
+      req: { baseUrl: "/internal/users", route: { path: "/" } },
+      status: () => res,
+      json: (value: unknown) => {
+        payload = value;
+        return res;
+      },
+    } as unknown as Response;
+    const base = { requestId: REQUEST_ID, params: {}, body: {} };
+
+    await controller.batchGetUsers({ ...base, query: { ids: "9" }, auth: SERVICE } as unknown as Request, res);
+    expect(payload).toMatchObject({ success: true, data: [summary(9)] });
+
+    const user: UserAuth = { kind: "user", userId: 1, role: "admin", status: "active", ev: true };
+    await expect(
+      controller.batchGetUsers({ ...base, query: { ids: "9" }, auth: user } as unknown as Request, res),
+    ).rejects.toMatchObject({ code: "ServiceTokenRequired" });
+  });
+});
+
+describe("UserSummaryResponseDto", () => {
+  it("should carry exactly the seven contract fields and drop email, phone and hashes", () => {
+    const dto = UserSummaryResponseDto.from({
+      ...summary(5),
+      email: "person5@example.test",
+      phone: "+201000000001",
+      passwordHash: "$argon2id$x",
+    } as UserSummary);
+
+    expect(Object.keys(dto).sort()).toEqual(["avatarUrl", "fullName", "id", "locale", "role", "status", "timezone"]);
+    const text = JSON.stringify(dto);
+    expect(text).not.toContain("example.test");
+    expect(text).not.toContain("+2010");
+    expect(text).not.toContain("argon2");
+  });
+
+  it("should keep a null avatar as null and a set avatar as is", () => {
+    expect(UserSummaryResponseDto.from(summary(1)).avatarUrl).toBeNull();
+    expect(UserSummaryResponseDto.from({ ...summary(1), avatarUrl: "https://cdn.example.test/a.png" }).avatarUrl).toBe(
+      "https://cdn.example.test/a.png",
+    );
+  });
+});
+
+describe("internalBatchPolicy", () => {
+  it("should require users:read with no ownership", () => {
+    expect(internalBatchPolicy).toEqual({ kind: "service", scope: "users:read", owner: "none" });
+  });
+});
+
+describe("InternalUsersService.getSummaries", () => {
+  let written: string[];
+  let accounts: { findSummariesLive: jest.Mock };
+  let service: InternalUsersService;
+
+  beforeEach(() => {
+    written = [];
+    accounts = { findSummariesLive: jest.fn().mockResolvedValue([summary(1), summary(2)]) };
+    service = new InternalUsersService(
+      new Logger({
+        service: "identity-service",
+        level: "debug",
+        production: false,
+        sink: (line) => {
+          written.push(line);
+        },
+      }),
+      accounts as unknown as AccountService,
+    );
+  });
+
+  it("should de-duplicate ids, keeping first-seen order, before the single lookup", async () => {
+    await service.getSummaries([2, 1, 2, 1], "care-service");
+
+    expect(accounts.findSummariesLive).toHaveBeenCalledTimes(1);
+    expect(accounts.findSummariesLive).toHaveBeenCalledWith([2, 1]);
+  });
+
+  it("should log counts after de-duplication and the client id only, never a name or an id list", async () => {
+    await service.getSummaries([1, 2, 3, 3], "care-service");
+
+    const line = JSON.parse(written.join("").trim()) as Record<string, unknown>;
+    expect(line).toMatchObject({ message: "internal_users_read", clientId: "care-service", requested: 3, returned: 2 });
+    expect(written.join("")).not.toContain("Amira");
+    expect(Object.keys(line)).not.toContain("ids");
+  });
+
+  it("should return an empty list when nothing matches", async () => {
+    accounts.findSummariesLive.mockResolvedValue([]);
+
+    await expect(service.getSummaries([404], "care-service")).resolves.toEqual([]);
+  });
+
+  it("should let a database failure propagate as is", async () => {
+    accounts.findSummariesLive.mockRejectedValue(new Error("connection lost"));
+
+    await expect(service.getSummaries([1], "care-service")).rejects.toThrow("connection lost");
   });
 });

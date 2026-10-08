@@ -63,7 +63,7 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [adr/0009-availability-and-recovery-targets.md](./adr/0009-availability-and-recovery-targets.md) | the targets are 99.95 %, multi-AZ, with the stated RPO/RTO | explanation |
 | [adr/0010-manual-admin-provisioning-role-policies.md](./adr/0010-manual-admin-provisioning-role-policies.md) | admins are inserted manually and set their password via reset; policies list roles explicitly | explanation |
 | [adr/0011-pii-retained-on-soft-delete.md](./adr/0011-pii-retained-on-soft-delete.md) | soft-deleted accounts keep their PII in MVP (and when that is revisited) | explanation |
-| [adr/0012-doctor-status-only-via-care.md](./adr/0012-doctor-status-only-via-care.md) | the admin status route refuses doctor targets (its reinstatement clause is amended by ADR 0023) | explanation |
+| [adr/0012-doctor-status-only-via-care.md](./adr/0012-doctor-status-only-via-care.md) | the admin status route refuses doctor targets | explanation |
 | [adr/0013-log-derived-metrics.md](./adr/0013-log-derived-metrics.md) | metrics come from structured logs and there is no tracing SDK | explanation |
 | [adr/0014-health-liveness-readiness-split.md](./adr/0014-health-liveness-readiness-split.md) | health is split into liveness and readiness | explanation |
 | [adr/0015-foundation-runtime-dependencies.md](./adr/0015-foundation-runtime-dependencies.md) | `reflect-metadata` was added and there is no `cors`, `uuid`, or `dotenv` package (in-house CORS, `crypto.randomUUID`, Node env files) | explanation |
@@ -76,6 +76,7 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [adr/0022-service-client-rotation-window-timing.md](./adr/0022-service-client-rotation-window-timing.md) | why the rotation-window double argon2id verify is an accepted timing residual and `secret_expired` is only a hint | explanation |
 | [adr/0023-internal-status-accepts-suspended-to-active.md](./adr/0023-internal-status-accepts-suspended-to-active.md) | why the internal status route accepts `suspended -> active` (Case 4, doctor reinstatement) | explanation |
 | [adr/0024-notification-contacts-lookup-and-scope.md](./adr/0024-notification-contacts-lookup-and-scope.md) | why the contacts lookup and the `users:contact:read` scope exist (Case 5) | explanation |
+| [adr/0025-internal-status-route-doctor-targets-only.md](./adr/0025-internal-status-route-doctor-targets-only.md) | why `PATCH /internal/users/:id/status` refuses patient and admin targets with 403 | explanation |
 
 ## Contract (source of truth — prose above derives from it)
 | Contract | Defines | Lens |
@@ -101,6 +102,7 @@ module doc when it is created.
 | [users/brainstorm.md](./users/brainstorm.md) | see the agreed scope of admin user management (list/get users, patient status changes with history, session list/revoke) and its open questions | explanation |
 | [service-auth/brainstorm.md](./service-auth/brainstorm.md) | see the agreed scope of service-auth and internal-users (Cases 1-3, two modules, ops-provisioned clients, record-only `actorUserId`) and its open questions | explanation |
 | [service-auth/spec.md](./service-auth/spec.md) | build or change service-auth: `service_clients` migration, `POST /internal/auth/token` (client credentials, per-IP and per-client limiters), `serviceGuard` and the `service` policy kind, internal listener wiring, health parity, ops provisioning/seed scripts, test plan; ready (v1.1.1, no open questions; contract edits C-1/C-2 applied; module built and reconciled with the code on 2026-10-08) | reference |
+| [internal-users/spec.md](./internal-users/spec.md) | build or change internal-users: `GET /internal/users` (Case 2), `GET /internal/users/contacts` (Case 5), `PATCH /internal/users/{id}/status` (Cases 1, 3, 4: service transition table, idempotent no-op, suspend/reject revoke all families + history row in one transaction, `actorUserId` as data), test plan; ready (v1.0.0, no open questions, no required contract change) | reference |
 | [service-auth/tasks.md](./service-auth/tasks.md) | see the service-auth build tasks and their status (all done; build, tests, manual QA and docs complete) | reference |
 | [service-auth/manual-qa.md](./service-auth/manual-qa.md) | re-run or review the 217 CURL checks of the token exchange (JSON and form, every error code, limiters, rotation, provisioning scripts) and the notes N-1..N-6 (what is not reachable until `internal-users`) | how-to |
 | [auth/tasks.md](./auth/tasks.md) | see Epic A's unit graph (auth then users, serial) and the auth build tasks and their status (build, tests and manual QA done; review findings resolved) | reference |

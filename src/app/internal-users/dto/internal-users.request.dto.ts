@@ -18,7 +18,7 @@ import { UserStatus } from "../../auth/enums";
  * Request DTOs (CLAUDE.md -> Module file conventions, item 2). Unknown properties are rejected by the
  * `validate*` helpers; messages are error-envelope `issue` strings and never echo the submitted value.
  */
-export const MAX_CONTACT_IDS = 100;
+export const MAX_IDS = 100;
 const REASON_MAX_LENGTH = 500;
 const CANONICAL_ID = /^[1-9][0-9]*$/;
 /** Longer than 100 canonical ids with commas can ever be; stops a giant query string being split. */
@@ -33,11 +33,11 @@ function parseIds({ obj, key, value }: { obj: Record<string, unknown>; key: stri
   return raw.split(",").map((entry) => (CANONICAL_ID.test(entry) ? Number(entry) : Number.NaN));
 }
 
-export class ContactsQueryDto {
+export class IdsQueryDto {
   @Transform(parseIds)
   @IsArray()
   @ArrayMinSize(1)
-  @ArrayMaxSize(MAX_CONTACT_IDS)
+  @ArrayMaxSize(MAX_IDS)
   @IsInt({ each: true })
   @Min(1, { each: true })
   @Max(Number.MAX_SAFE_INTEGER, { each: true })

@@ -3,7 +3,7 @@ title: internal-users — Tasks
 owner: identity-team
 service: identity-service
 module: internal-users
-status: in-progress
+status: done
 last_verified: 2026-10-08
 tags: [tasks, internal-users]
 related: [internal-users-spec, adr-0023-internal-status-accepts-suspended-to-active, adr-0024-notification-contacts-lookup-and-scope, adr-0025-internal-status-route-doctor-targets-only]
@@ -36,4 +36,4 @@ Missing: `GET /internal/users` (Case 2) and the doctor-targets-only rule (D-3 / 
 - [x] (mount) src/internal-routes.ts
 - [x] (tests) unit (SERVICE_TRANSITIONS, BR-19, ids parsing, summaries) + integration batch/contacts/status/redis-down; green 2026-10-08
 - [x] (manual-qa) ← /manual-qa
-- [ ] (docs) service-card / api.md / service-auth.md scope table / runbook / INDEX (spec section 12.3)
+- [x] (docs) service-card / api.md / service-auth.md scope table / runbook / INDEX (spec section 12.3); contract description edits (duplicate ids, cap, scope-before-validation, explicit 403); spec v1.0.1 as-built notes (2026-10-08)

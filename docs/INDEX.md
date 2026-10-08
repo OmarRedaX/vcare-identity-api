@@ -16,11 +16,11 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 
 > Status (2026-10-08): `service-auth` is built too (`POST /internal/auth/token`, the service guard and `service` policy
 > kind, `service_clients`, provisioning/seed scripts; tested, QA'd, reviewed; see [service-auth/tasks.md](./service-auth/tasks.md));
-> `internal-users` is the next module. Earlier status (2026-10-07): the `foundation`, `auth` and `users` modules are built — the skeleton, both listeners, health
+> `internal-users` is built as well (`GET /internal/users`, `GET /internal/users/contacts`, `PATCH /internal/users/{id}/status`; doctor targets only, ADR 0025; tested, QA'd, reviewed with the docs findings resolved; see [internal-users/tasks.md](./internal-users/tasks.md)). Earlier status (2026-10-07): the `foundation`, `auth` and `users` modules are built — the skeleton, both listeners, health
 > probes, the cross-cutting `src/lib/` pieces, and the whole public auth surface (registration, login, refresh
 > rotation, logout, password flows, own profile, JWKS) plus the outbox worker and retention purges; `users` (Epic A unit 2) adds admin
 > list/get users, patient suspend/reinstate with `user_status_changes` history, session list/revoke, and the shared
-> user-first lock order for refresh versus revocation (ADR 0019/0020). The `/internal/users*` routes (Epic B, `internal-users`) are not built yet. The **auth and users contract changes are
+> user-first lock order for refresh versus revocation (ADR 0019/0020). The **auth and users contract changes are
 > applied** (C-1…C-14 of [auth/spec.md](./auth/spec.md) §14.2); the architecture shards are reconciled with
 > as-built auth code. Auth and users have unit and integration tests, a manual QA run and a code review whose findings are
 > resolved (see [auth/tasks.md](./auth/tasks.md), [users/tasks.md](./users/tasks.md)). These docs are seeded from the PRD and `CLAUDE.md` and refined by
@@ -33,7 +33,7 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [service-card.md](./service-card.md) | 30-second summary (owner, data, dependencies, callers, endpoints) — synced to the hub | — |
 | [system-design.md](./system-design.md) | find the architecture shard for a concern (router) | explanation |
 | [quickstart.md](./quickstart.md) | run the service locally for the first time (deps, migrate, listeners, health, tests); the auth walkthrough is planned; section 5 seeds a service client and exchanges a service token | tutorial |
-| [runbook.md](./runbook.md) | on-call: an alert fired, rotate a key, provision/rotate/disable a service client, revoke sessions, create an admin, trace a request | how-to |
+| [runbook.md](./runbook.md) | on-call: an alert fired, rotate a key, provision/rotate/disable a service client, revoke sessions, create an admin, trace a request, check Case 3/4 status calls and `status_change_actor_unknown` | how-to |
 
 ## Architecture (one doc = one job)
 | Doc | Read it when you need to… | Lens |
@@ -102,7 +102,10 @@ module doc when it is created.
 | [users/brainstorm.md](./users/brainstorm.md) | see the agreed scope of admin user management (list/get users, patient status changes with history, session list/revoke) and its open questions | explanation |
 | [service-auth/brainstorm.md](./service-auth/brainstorm.md) | see the agreed scope of service-auth and internal-users (Cases 1-3, two modules, ops-provisioned clients, record-only `actorUserId`) and its open questions | explanation |
 | [service-auth/spec.md](./service-auth/spec.md) | build or change service-auth: `service_clients` migration, `POST /internal/auth/token` (client credentials, per-IP and per-client limiters), `serviceGuard` and the `service` policy kind, internal listener wiring, health parity, ops provisioning/seed scripts, test plan; ready (v1.1.1, no open questions; contract edits C-1/C-2 applied; module built and reconciled with the code on 2026-10-08) | reference |
-| [internal-users/spec.md](./internal-users/spec.md) | build or change internal-users: `GET /internal/users` (Case 2), `GET /internal/users/contacts` (Case 5), `PATCH /internal/users/{id}/status` (Cases 1, 3, 4: service transition table, idempotent no-op, suspend/reject revoke all families + history row in one transaction, `actorUserId` as data), test plan; ready (v1.0.0, no open questions, no required contract change) | reference |
+| [internal-users/spec.md](./internal-users/spec.md) | build or change internal-users: `GET /internal/users` (Case 2), `GET /internal/users/contacts` (Case 5), `PATCH /internal/users/{id}/status` (Cases 1, 3, 4: service transition table, idempotent no-op, suspend/reject revoke all families + history row in one transaction, `actorUserId` as data), test plan; ready (v1.0.1, no open questions; as-built notes in §13: log events `internal_users_read` / `internal_contacts_read`, scope checked before validation) | reference |
+| [internal-users/tasks.md](./internal-users/tasks.md) | see the internal-users build tasks and their status (all done; build, tests, manual QA and docs complete) | reference |
+| [internal-users/manual-qa.md](./internal-users/manual-qa.md) | re-run or review the 219 CURL checks of the three `/internal/users*` routes (RBAC, scopes, Cases 1-5, doctor-only rule, revocation, privacy) and the notes N-1..N-5 | how-to |
+| [internal-users/reviews/review-20261008-1200.md](./internal-users/reviews/review-20261008-1200.md) | see the open code review of internal-users (no code findings; two docs findings resolved by `/update-docs`, pending verification by `/review-code`; the file is deleted once verified) | reference |
 | [service-auth/tasks.md](./service-auth/tasks.md) | see the service-auth build tasks and their status (all done; build, tests, manual QA and docs complete) | reference |
 | [service-auth/manual-qa.md](./service-auth/manual-qa.md) | re-run or review the 217 CURL checks of the token exchange (JSON and form, every error code, limiters, rotation, provisioning scripts) and the notes N-1..N-6 (what is not reachable until `internal-users`) | how-to |
 | [auth/tasks.md](./auth/tasks.md) | see Epic A's unit graph (auth then users, serial) and the auth build tasks and their status (build, tests and manual QA done; review findings resolved) | reference |

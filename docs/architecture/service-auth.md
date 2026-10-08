@@ -12,8 +12,8 @@ related: [system-design, auth-tokens, api, data-model, runbook, service-auth-spe
 # Service-to-Service Auth
 
 > **As built (2026-10-08):** the token endpoint, `serviceGuard`, the `service` policy kind and the provisioning
-> scripts exist (module `service-auth`). The guarded routes (`/internal/users`, `/internal/users/{id}/status`)
-> arrive with `internal-users`.
+> scripts exist (module `service-auth`), and the three guarded routes (`/internal/users`, `/internal/users/contacts`,
+> `/internal/users/{id}/status`) are built (module `internal-users`, [spec](../internal-users/spec.md)).
 
 How care-service (and later the Phase-2 AI service) calls Identity's `/internal/*` API. Platform-wide
 decision: hub ADR 0003 (service-token S2S auth). Identity is the token **issuer** for every vcare service,
@@ -91,9 +91,12 @@ Signed with the same Ed25519 key set as user tokens and verifiable via `/.well-k
 | Scope | Grants | Enforced by | Typical holder |
 |---|---|---|---|
 | `users:read` | `GET /internal/users?ids=` (batch summaries; no email/phone) | identity-service | care-service |
-| `users:status:write` | `PATCH /internal/users/{id}/status` | identity-service | care-service |
+| `users:status:write` | `PATCH /internal/users/{id}/status` (doctor targets only, [ADR 0025](../adr/0025-internal-status-route-doctor-targets-only.md); a patient or admin target is `403 Forbidden`) | identity-service | care-service |
 | `users:contact:read` | `GET /internal/users/contacts?ids=` (email, name, locale, status; **no phone**) | identity-service | **care-service only** — `chk_service_clients_contact_scope_care_only` in the database and the provisioning scripts refuse it for any other client ([ADR 0024](../adr/0024-notification-contacts-lookup-and-scope.md)); used by `care-worker` only |
 | `doctors:read` | Care's `GET /internal/doctors/{userId}/summary` | care-service (Identity only issues it, with `aud=vcare-care`) | **no MVP service client holds it**; reserved for admin tooling and the Phase-2 ai-service once provisioned (hub `TODO.md`) |
+
+Scopes are not interchangeable: `users:read` cannot read contacts or write status. The scope is checked by `authorize(policy)` **before**
+the route validates its query or body, so a token without the scope gets `403 InsufficientScope` even for malformed input.
 
 Scopes are coarse and resource-oriented. A new scope requires a contract change (here or in the
 enforcing service), an update to the `chk_service_clients_allowed_scopes` constraint, and a hub record.
@@ -114,8 +117,7 @@ Applied to every `/internal/*` route **except** `/internal/auth/token` and `/int
    verified).
 
 The guard performs no I/O (no database, no Redis): a client disabled or soft-deleted while holding a token keeps
-working until that token's `exp` (at most 300 s), the same accepted residual shape as ADR 0002. As built, no
-production route uses the guard yet (`internal-users` adds the first two); the module's tests mount a probe router.
+working until that token's `exp` (at most 300 s), the same accepted residual shape as ADR 0002. The three `internal-users` routes are the production users of the guard; the `service-auth` tests also mount a probe router.
 
 Data in the body is **data, not authorization**: `actorUserId` on a status change is recorded in
 `user_status_changes.actor_user_id` and never used to grant anything. The service identity recorded is the
@@ -125,12 +127,15 @@ token's `sub` (`actor_service`).
 - No outbound calls; p95 < 50 ms.
 - `PATCH /internal/users/{id}/status` accepts `status` `active | rejected | pending | suspended`
   (`pending` = Care re-opened a rejected application). Care may apply `pending → active|rejected`,
-  `rejected → pending`, `active → suspended`; `suspended → active` is admin-only on the public API and not
-  propagated to Care in MVP.
+  `rejected → pending`, `active → suspended` and `suspended → active` (Case 4, ADR 0023), for **doctor targets only**
+  (ADR 0025: a patient or admin target is `403 Forbidden`).
 - It is idempotent (same status → 200, no history row; already `suspended` still ensures no live refresh
   tokens), so Care's Case 3 "retry until success" loop is safe on timeouts and 5xx.
 - Any other pair → `409 InvalidStatusTransition`, which is **non-retryable**: Case 3 against a target that
   is not `active` signals drift between the services, so Care alerts instead of retrying.
+- Both lookups accept duplicate ids (collapsed) and cap at 100 entries as sent; each logs counts only (`internal_users_read`,
+  `internal_contacts_read`; `clientId`, `requested`, `returned`).
+- An unknown `actorUserId` is stored as `NULL` and logged `status_change_actor_unknown`; the status change still succeeds.
 - Batch lookup returns `fullName` (provider field name); consumers may rename it (Care exposes `displayName`).
 - The caller's `X-Request-Id` is adopted, logged, and stored on `user_status_changes.request_id`.
 - Changes to `/internal/*` shapes are breaking for Care: update `contracts/openapi.yaml` first, keep the old

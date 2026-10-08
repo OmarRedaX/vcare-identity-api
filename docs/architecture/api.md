@@ -20,7 +20,8 @@ If this page and the contract disagree, the contract wins and this page is stale
 > route (ADR 0012), and the health split (ADR 0014).
 >
 > **Built:** the `foundation` module (health) and the `auth` module (every `/api/auth/*` operation and
-> `/.well-known/jwks.json`). `users` (admin, 2026-10-07) is built too; `service-auth` (`POST /internal/auth/token`, 2026-10-08) is built; `internal-users` below is contract-only until built.
+> `/.well-known/jwks.json`). `users` (admin, 2026-10-07), `service-auth` (`POST /internal/auth/token`) and `internal-users`
+> (the three `/internal/users*` routes, 2026-10-08) are built too.
 Per-field request/response schemas are in the contract; this page shows roles, ownership, and errors.
 
 ## Conventions
@@ -121,9 +122,14 @@ Body (JSON or form-encoded): `grant_type=client_credentials`, `client_id`, `clie
 |---|---|---|---|---|
 | `GET /internal/users?ids=1,2,3` | service | `users:read` | `200` `UserSummary[]` | `ValidationFailed` 400 (0 or > 100 ids, non-integer) · `ServiceTokenRequired` 401 (incl. any user token) · `InsufficientScope` 403 |
 | `GET /internal/users/contacts?ids=1,2,3` | service | `users:contact:read` (care-service only) | `200` `UserContact[]` `{ id, email, fullName, locale, status }` (`no-store`) | `ValidationFailed` 400 (0 or > 100 ids, non-integer) · `ServiceTokenRequired` 401 (incl. any user token) · `InsufficientScope` 403 |
-| `PATCH /internal/users/{id}/status` | service | `users:status:write` | `200` `StatusChangeResponse` `{ id, status, updatedAt }` | `ValidationFailed` 400 · `ServiceTokenRequired` 401 · `InsufficientScope` 403 · `NotFound` 404 · `InvalidStatusTransition` 409 |
+| `PATCH /internal/users/{id}/status` | service | `users:status:write` | `200` `StatusChangeResponse` `{ id, status, updatedAt }` | `ValidationFailed` 400 · `ServiceTokenRequired` 401 · `InsufficientScope` 403 · `Forbidden` 403 (target is not a doctor) · `NotFound` 404 · `InvalidStatusTransition` 409 |
 
 Notes
+- **Scope before validation:** on all three routes `authorize` runs before the query or body is validated, so a token without the
+  scope gets `403 InsufficientScope` even for malformed input.
+- `ids` (both lookups): duplicates are accepted and collapsed before the query; the 100 cap counts entries as sent, before
+  de-duplication (101 entries is `400`, even if not distinct). Both lookups log counts only (`internal_users_read`,
+  `internal_contacts_read`: `clientId`, `requested`, `returned`, after de-duplication).
 - `/internal/users`: unknown and soft-deleted ids are omitted; `UserSummary` is
   `{ id, fullName, avatarUrl, role, status, timezone, locale }` — never email or phone.
 - `/internal/users/contacts` ([ADR 0024](../adr/0024-notification-contacts-lookup-and-scope.md), Case 5): one `id = ANY($1)` query over
@@ -134,12 +140,15 @@ Notes
   nothing and revives no refresh token. Any other pair → `409 InvalidStatusTransition` (non-retryable).
 - Internal status body `{ status: "active" | "rejected" | "pending" | "suspended", reason, actorUserId }`.
   Allowed: `pending → active|rejected` (Case 1), `rejected → pending` (Care re-opened a rejected
-  application), `active → suspended` (Case 3). `suspended → active` is **not** allowed here (admin-only, public API).
+  application), `active → suspended` (Case 3), `suspended → active` (Case 4).
 - Setting the current status again → 200 no-op (no history row; already `suspended` still ensures no live
   refresh tokens). Every other pair → `409 InvalidStatusTransition`, which callers treat as **non-retryable**
   — e.g. Case 3 on a target that is not `active` signals drift, so Care alerts instead of retrying.
 - Entering `suspended` or `rejected` revokes all refresh-token families in the same transaction as the update
   and the history row.
+- **Doctor targets only** ([ADR 0025](../adr/0025-internal-status-route-doctor-targets-only.md)): after the existence check
+  (`404`), a patient or admin target is `403 Forbidden` with no write, no revoke and no history row; non-retryable.
+  An unknown `actorUserId` is stored as `NULL` and logged (`status_change_actor_unknown`); the call succeeds.
 - `UserSummary.fullName` is the provider field name; Care renames it to `displayName` on its side.
 
 ## Error code catalogue
@@ -155,8 +164,8 @@ Notes
 | `AccountPending` | 403 | not returned by Identity routes in MVP (Identity has no doctor-only action); reserved in the shared catalogue |
 | `AccountSuspended` | 403 | login, refresh, bearer routes whose token carries `status=suspended` |
 | `AccountRejected` | 403 | not returned by Identity routes (rejected accounts can sign in, ADR 0004); reserved in the shared catalogue |
-| `Forbidden` | 403 | admin routes (wrong role, self / admin / doctor target) |
-| `ServiceTokenRequired` | 401 | `/internal/users`, `/internal/users/{id}/status` |
+| `Forbidden` | 403 | admin routes (wrong role, self / admin / doctor target); `PATCH /internal/users/{id}/status` (patient or admin target, ADR 0025) |
+| `ServiceTokenRequired` | 401 | `/internal/users`, `/internal/users/contacts`, `/internal/users/{id}/status` |
 | `InsufficientScope` | 403 | internal routes; `/internal/auth/token` |
 | `NotFound` | 404 | `/api/users/{id}*`, `/internal/users/{id}/status` |
 | `Conflict` | 409 | `register/complete` (a concurrent registration for the same email won the race); any auth POST that accepts `Idempotency-Key` while the first request with that key is in flight (`Retry-After: 1`) |

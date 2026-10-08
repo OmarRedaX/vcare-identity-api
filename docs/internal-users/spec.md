@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 module: internal-users
 status: ready
-version: 1.0.0
+version: 1.0.1
 diataxis: reference
 last_verified: 2026-10-08
 tags: [spec, internal-users, internal-listener, service-token, account-status, batch-lookup, contacts, revocation]
@@ -157,6 +157,11 @@ use the standard envelope. These routers are mounted only by `src/internal-route
   `InsufficientScope`, `InternalError`.
 - **Idempotency-Key:** n/a (GET). **Pagination:** none (bounded batch by ids; the cursor rule applies to lists).
   **Filters:** `ids` only.
+- **Evaluation order:** guard -> scope (`authorize`) -> query validation (400) -> lookup. A token without the scope gets
+  `403 InsufficientScope` even when `ids` is malformed; validation never runs for an unauthorized caller. The same
+  order holds for the other two routes (3.2, 3.3).
+- **Logging:** the service logs `internal_users_read` with `{ clientId, requested, returned }`, counts only, both
+  counted after de-duplication (D-9). Never an id list or any profile field.
 
 ### 3.2 `GET /internal/users/contacts` (`getUserContacts`)
 - **Guard:** `service`. **Roles:** `[service]`. **Ownership:** `none`. **Scope:** `users:contact:read` (only the
@@ -167,8 +172,9 @@ use the standard envelope. These routers are mounted only by `src/internal-route
   **No phone**, ever; the SQL column list excludes it. Omission and ordering as 3.1. Soft-deleted users are omitted
   (their email is free for re-registration).
 - **Status codes / error codes:** as 3.1.
-- **Logging:** the access log carries route, `clientId`, status, duration (request logger). The handler logs
-  `contacts_looked_up` with `{ requested, returned }` counts only. Never an address, name or id list.
+- **Logging:** the access log carries route, `clientId`, status, duration (request logger). The service logs
+  `internal_contacts_read` with `{ clientId, requested, returned }`, counts only, both counted after de-duplication
+  (D-9). Never an address, name or id list. (The batch route logs `internal_users_read` the same way, section 3.1.)
 
 ### 3.3 `PATCH /internal/users/{id}/status` (`internalUpdateUserStatus`)
 - **Guard:** `service`. **Roles:** `[service]`. **Ownership:** `none` (doctor targets only, D-3, ADR 0025). **Scope:**
@@ -263,7 +269,8 @@ All codes already exist; none is added.
   Only `care-service` is provisioned with these scopes in MVP; `users:contact:read` is database-restricted to it.
 - **Audit:** every real status change is a `user_status_changes` row (who, from/to, reason, `actor_service`,
   `request_id`). Logs: `user_status_changed`, `status_change_refused`, `status_change_actor_unknown`,
-  `contacts_looked_up`, plus the access log; metrics via log-derived counters (ADR 0013): count of status changes by
+  `internal_users_read`, `internal_contacts_read` (both `{ clientId, requested, returned }`, counted after
+  de-duplication, counts only), plus the access log; metrics via log-derived counters (ADR 0013): count of status changes by
   `to` and of `status_change_refused`.
 - **Never logged:** the service token, `Authorization`, any email, name, phone, the contacts payload, the status `reason`
   (free text, ADR 0021), `ids` lists of contacts requests. Do not pass them to the logger; the redactor is defence in depth.
@@ -340,6 +347,10 @@ changes required: none (the three operations already exist and match). The optio
 
 ## 12. Accepted follow-ups
 
+> Applied 2026-10-08 by `/update-docs internal-users`: 12.1 (duplicate and cap wording for both lookups in the
+> contract; the 403 of the status route now names `InsufficientScope` and `Forbidden`) and 12.3. The `actorUserId`
+> sentence of 12.1 was already in the contract.
+
 ### 12.1 Optional contract wording (non-breaking, apply in `/develop` step 0 or `/update-docs`)
 - `internalUpdateUserStatus` description: add one sentence that an `actorUserId` that does not exist is recorded as
   `NULL` rather than rejected (D-6), and that a repeated `suspended` call re-asserts revocation (already stated).
@@ -354,3 +365,17 @@ None. No hub document changes: cases 1-5, the scopes and the data ownership are 
 `docs/service-card.md` (endpoints, status of `internal-users`, `users:contact:read`), `docs/architecture/api.md`,
 `docs/architecture/service-auth.md` (scope table), `docs/INDEX.md` status banner, `docs/runbook.md` (Case 3 stuck
 retries, reinstatement now via Care).
+
+## 13. As-built notes (2026-10-08, version 1.0.1)
+Intentional divergences from, or additions to, version 1.0.0; the code is the reference.
+- **Log event names.** The contacts event is `internal_contacts_read` (was `contacts_looked_up` in 1.0.0); the batch route
+  logs `internal_users_read`. Both carry `{ clientId, requested, returned }`, counted after de-duplication (D-9), emitted
+  by `InternalUsersService`, never by the controller.
+- **Scope before validation.** `authorize(policy)` runs before the DTO validation on all three routes, so a missing
+  scope is `403 InsufficientScope` regardless of the input (sections 3.1 to 3.3). Pinned by the RBAC integration tests.
+- **Cache headers.** `GET /internal/users` sends no `Cache-Control` (no PII; the contract declares none). Contacts and the
+  status PATCH are `Cache-Control: no-store` (D-10).
+- **Migration dependency.** Issuing `users:contact:read` needs migration `20261008000100`; a database without it cannot
+  provision `care-service` with the scope (manual QA N-1).
+- **Refresh after suspension** returns `401 RefreshTokenInvalid` (the family is already revoked), not `403 AccountSuspended`;
+  BR-14 allows either (manual QA N-3).

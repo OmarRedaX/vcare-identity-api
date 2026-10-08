@@ -4,7 +4,7 @@ import type { StatusCaller } from "./enums";
 
 /** Every non-entity type of the module (CLAUDE.md -> Module file conventions, item 11). */
 
-/** D-1: one transition method, two caller kinds; only `admin` is wired in this unit. */
+/** D-1: one transition method, two caller kinds. `actorUserId` of a service caller is recorded as data only. */
 export type StatusChangeCaller =
   | { kind: StatusCaller.Admin; actorUserId: number }
   | { kind: StatusCaller.Service; actorService: string; actorUserId: number };

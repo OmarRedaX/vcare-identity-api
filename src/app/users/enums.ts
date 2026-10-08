@@ -1,4 +1,4 @@
-/** Who initiates a status change; `service` is wired by Epic B (`internal-users`), not by this unit (D-1). */
+/** Who initiates a status change: an admin through `/api/users`, or a service through `/internal/users` (D-1). */
 export enum StatusCaller {
   Admin = "admin",
   Service = "service",

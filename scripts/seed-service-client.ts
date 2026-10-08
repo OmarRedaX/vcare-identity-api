@@ -2,7 +2,7 @@
  * Local development only: upserts a synthetic service client and prints a fresh random secret to stdout, once
  * (docs/service-auth/spec.md section 6.2). Refuses to run when NODE_ENV=production.
  *
- *   npm run seed:service-client                       # care-service, users:read users:status:write, vcare-identity
+ *   npm run seed:service-client                       # care-service, users:read users:status:write users:contact:read, vcare-identity
  *   npm run seed:service-client -- --client-id care-service --scopes "users:read"
  *
  * The secret is never stored in the repository or a fixture. Integration tests do not use this script; they

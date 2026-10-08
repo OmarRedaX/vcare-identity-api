@@ -5,7 +5,12 @@
  *
  * Errors name the offending **argument**, never a value (a mistyped secret must not end up in a terminal log).
  */
-import { SERVICE_CLIENT_ID_PATTERN, SERVICE_SCOPES } from "../src/lib/auth/constants";
+import {
+  CONTACT_SCOPE,
+  CONTACT_SCOPE_CLIENT_ID,
+  SERVICE_CLIENT_ID_PATTERN,
+  SERVICE_SCOPES,
+} from "../src/lib/auth/constants";
 
 export const DEFAULT_OVERLAP_HOURS = 24;
 export const MAX_OVERLAP_HOURS = 168;
@@ -119,6 +124,13 @@ function parseScopes(value: string | undefined): string[] {
   return scopes;
 }
 
+/** ADR 0024: the contact scope is care-service only; the table CHECK is the guarantee, this is the clear message. */
+function assertContactScopeAllowed(clientId: string, scopes: readonly string[]): void {
+  if (scopes.includes(CONTACT_SCOPE) && clientId !== CONTACT_SCOPE_CLIENT_ID) {
+    throw new ArgumentError(`--scopes: ${CONTACT_SCOPE} can only be granted to ${CONTACT_SCOPE_CLIENT_ID}`);
+  }
+}
+
 function parseAudiences(value: string | undefined): string[] {
   if (value === undefined) {
     throw new ArgumentError("--audiences is required");
@@ -150,11 +162,14 @@ export function parseProvisionArgs(argv: readonly string[]): ProvisionArgs {
     if (raw.flags.has("leaked") || raw.values.has("overlap-hours")) {
       throw new ArgumentError("--leaked and --overlap-hours need --rotate");
     }
+    const name = parseName(raw.values.get("name"));
+    const scopes = parseScopes(raw.values.get("scopes"));
+    assertContactScopeAllowed(clientId, scopes);
     return {
       mode: "new",
       clientId,
-      name: parseName(raw.values.get("name")),
-      scopes: parseScopes(raw.values.get("scopes")),
+      name,
+      scopes,
       audiences: parseAudiences(raw.values.get("audiences")),
     };
   }
@@ -181,10 +196,17 @@ export function parseProvisionArgs(argv: readonly string[]): ProvisionArgs {
 /** `scripts/seed-service-client.ts`: every argument has a local-dev default. */
 export function parseSeedArgs(argv: readonly string[]): SeedArgs {
   const raw = readRaw(argv, ["client-id", "name", "scopes", "audiences"]);
+  const clientId = raw.values.has("client-id") ? requireClientId(raw) : CONTACT_SCOPE_CLIENT_ID;
+  const defaultScopes =
+    clientId === CONTACT_SCOPE_CLIENT_ID
+      ? `users:read users:status:write ${CONTACT_SCOPE}`
+      : "users:read users:status:write";
+  const scopes = parseScopes(raw.values.get("scopes") ?? defaultScopes);
+  assertContactScopeAllowed(clientId, scopes);
   return {
-    clientId: raw.values.has("client-id") ? requireClientId(raw) : "care-service",
+    clientId,
     name: parseName(raw.values.get("name") ?? "Care service (local)"),
-    scopes: parseScopes(raw.values.get("scopes") ?? "users:read users:status:write"),
+    scopes,
     audiences: parseAudiences(raw.values.get("audiences") ?? "vcare-identity"),
   };
 }

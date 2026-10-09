@@ -108,30 +108,31 @@ export function startWorker(): Promise<WorkerHandle> {
 }
 
 if (require.main === module) {
-  const boot = startWorker().then((worker) => {
-    const exitAfterShutdown = (reason: ShutdownReason): void => {
-      void worker.shutdown(reason).then((code) => {
-        process.exit(code);
-      });
-    };
+  // Signal handlers are installed before the worker starts, so a SIGTERM that arrives right after
+  // "worker_started" is logged still runs the graceful shutdown instead of killing the process outright.
+  const exitAfterShutdown = (reason: ShutdownReason): void => {
+    void booted.then((worker) => worker.shutdown(reason)).then((code) => {
+      process.exit(code);
+    });
+  };
 
-    process.on("SIGTERM", () => {
-      exitAfterShutdown("SIGTERM");
-    });
-    process.on("SIGINT", () => {
-      exitAfterShutdown("SIGINT");
-    });
-    process.on("uncaughtException", (err: Error) => {
-      logger.error("uncaught_exception", { err });
-      exitAfterShutdown("uncaughtException");
-    });
-    process.on("unhandledRejection", (err: unknown) => {
-      logger.error("unhandled_rejection", { err });
-      exitAfterShutdown("unhandledRejection");
-    });
+  process.on("SIGTERM", () => {
+    exitAfterShutdown("SIGTERM");
+  });
+  process.on("SIGINT", () => {
+    exitAfterShutdown("SIGINT");
+  });
+  process.on("uncaughtException", (err: Error) => {
+    logger.error("uncaught_exception", { err });
+    exitAfterShutdown("uncaughtException");
+  });
+  process.on("unhandledRejection", (err: unknown) => {
+    logger.error("unhandled_rejection", { err });
+    exitAfterShutdown("unhandledRejection");
   });
 
-  boot.catch((err: unknown) => {
+  const booted: Promise<WorkerHandle> = Promise.resolve().then(startWorker);
+  booted.catch((err: unknown) => {
     logger.error("boot_failed", { err });
     process.exit(1);
   });

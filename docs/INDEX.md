@@ -3,7 +3,7 @@ title: Identity Service — Docs Index
 owner: identity-team
 service: identity-service
 status: draft
-last_verified: 2026-10-10
+last_verified: 2026-10-11
 tags: [index, router, identity]
 related: [service-card, system-design, runbook, quickstart]
 ---
@@ -112,7 +112,6 @@ module doc when it is created.
 | [users/manual-qa.md](./users/manual-qa.md) | re-run or review the CURL checks of the five `/api/users` operations (RBAC, status transitions, session revocation, privacy) and the N-1 note on refresh after suspension | how-to |
 | [auth/manual-qa.md](./auth/manual-qa.md) | re-run or review the CURL checks of every `/api/auth/*` operation and the JWKS (enumeration safety, idempotency, refresh rotation/reuse/grace, rate limits, no-store, log PII scan) and see the open defects | how-to |
 | [foundation/manual-qa.md](./foundation/manual-qa.md) | re-run or review the CURL checks of health, request id, envelope, listener isolation, headers, CORS, and the readiness table with Redis/Postgres stopped | how-to |
-| [foundation/reviews/review-20260926-0835.md](./foundation/reviews/review-20260926-0835.md) | verify the reopened cursor validation finding and the foundation review history | reference |
 
 ---
 _Platform-scope questions (platform overview, deployment topology, capacity assumptions, who calls us, Care's

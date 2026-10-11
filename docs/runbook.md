@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: how-to
-last_verified: 2026-10-08
+last_verified: 2026-10-11
 tags: [runbook, operations, on-call, identity]
 related: [service-card, auth-tokens, service-auth, adr-0022-service-client-rotation-window-timing, service-auth-spec, infrastructure, deployment, foundation-manual-qa]
 ---
@@ -151,11 +151,11 @@ logs.
 
 ### Create an admin account (MVP manual procedure — ADR 0010)
 1. Open a ticket naming the person and approver. Use the audited ops DB session for the target environment.
-2. Generate an **unusable** password hash — argon2id of 64 random bytes that are never printed or stored — with the
-   service's hashing helper (planned script; until it exists, run the `argon2` library in a one-off container,
-   reading randomness from `crypto.randomBytes`, printing only the encoded hash).
-3. Insert the row with explicit values (no defaults on critical columns):
-   `INSERT INTO users (email, password_hash, full_name, role, status, email_verified_at, timezone, locale) VALUES ('<email>', '<hash>', '<full name>', 'admin', 'active', now(), '<IANA tz>', '<locale>');`
+2. Generate an **unusable** password hash — argon2id of 64 random bytes that are never printed or stored — with
+   `npm run admin:unusable-hash` (`scripts/unusable-password-hash.ts`; prints only the encoded hash).
+3. Insert the row with explicit values (no defaults on critical columns). The hash contains `$`, so quote it with
+   dollar-quoting (`$h$…$h$`) or run the statement from a file, never an unquoted shell string:
+   `INSERT INTO users (email, password_hash, full_name, role, status, email_verified_at, timezone, locale) VALUES ('<email>', $h$<hash>$h$, '<full name>', 'admin', 'active', now(), '<IANA tz>', '<locale>');`
 4. Ask the admin to use **Forgot password** on the web app; the reset email sets their own password. Confirm
    delivery (no `OutboxDeadJobs` for `send_password_reset`).
 5. Record the new user id in the ticket. **To remove admin rights:** update `role`/`status` in the same audited way,

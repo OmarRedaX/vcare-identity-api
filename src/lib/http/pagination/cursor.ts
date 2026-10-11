@@ -37,7 +37,7 @@ export function decodeCursor(cursor: string, sortKind: CursorSortKind = "string"
       ? typeof v === "number" && Number.isFinite(v)
       : sortKind === "iso-timestamp"
         ? typeof v === "string" && ISO_TIMESTAMP.test(v) && !Number.isNaN(Date.parse(v))
-        : typeof v === "string" || (typeof v === "number" && Number.isFinite(v));
+        : typeof v === "string";
   const idIsValid = typeof id === "number" && Number.isSafeInteger(id) && id > 0;
   if (!sortValueIsValid || !idIsValid) {
     invalid();

@@ -34,7 +34,11 @@ describe("cursor", () => {
       v: "2026-09-16T00:00:00.000Z",
       id: 42,
     });
-    expect(decodeCursor(encodeCursor({ v: 17, id: 1 }))).toEqual({ v: 17, id: 1 });
+    expect(decodeCursor(encodeCursor({ v: 17, id: 1 }), "number")).toEqual({ v: 17, id: 1 });
+  });
+
+  it("should throw ValidationFailed on field cursor when a string-sort cursor carries a numeric value", () => {
+    expectValidationFailedOnCursor(() => decodeCursor(encodeCursor({ v: 17, id: 1 }), "string"));
   });
 
   it("should throw ValidationFailed on field cursor when the cursor is not base64url JSON", () => {

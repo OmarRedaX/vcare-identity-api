@@ -3,7 +3,7 @@ title: Identity Service — Service Card
 owner: identity-team
 service: identity-service
 status: ready
-last_verified: 2026-10-08
+last_verified: 2026-10-11
 tags: [service-card, catalog, identity]
 related: [index, system-design, runbook, data-model, api, design-baseline, deployment]
 sync_to_hub: catalog/identity-service.card.md
@@ -49,7 +49,7 @@ documents, or any clinical data (care-service).
 | care-service | `PATCH /internal/users/{id}/status` | Case 1 — verification decision activates or rejects a doctor account (doctor targets only: a patient or admin target is `403 Forbidden`, ADR 0025); `pending` when Care re-opens a rejected application | retry on timeout/5xx; `409 InvalidStatusTransition` is non-retryable |
 | care-service | `PATCH /internal/users/{id}/status` | Case 3 — suspension revokes all sessions | must not degrade: retry until success + alert; `409` (target not `active`) → alert, no retry |
 | care-service | `PATCH /internal/users/{id}/status` | Case 4 — reinstatement (`suspended → active`, ADR 0023); idempotent, already `active` → 200 | retry and report pending (Care's policy); `409` → alert, no retry |
-| care-service (care-worker) | `GET /internal/users/contacts?ids=` | Case 5 — notification recipients, scope `users:contact:read` (care-service only, ADR 0024); returns email, name, locale, status, no phone | delay: outbox rows stay pending with backoff; Care never caches, stores or logs the response |
+| care-service (care-worker) | `GET /internal/users/contacts?ids=` | Case 5 — notification recipients, scope `users:contact:read` (care-service only, ADR 0024); returns `{ id, email, fullName, locale, status }`, no phone, with `Cache-Control: no-store` | delay: outbox rows stay pending with backoff; Care never caches, stores or logs the response |
 | care-service | `GET /internal/users?ids=` | Case 2 — batch profile hydration (≤ 100 ids as sent; duplicates collapsed; scope `users:read`) | degrade to cached profiles |
 | care-service | `POST /internal/auth/token` | obtain a 300 s service token (30/min per IP, 60/min per client; production needs `INTERNAL_TRUST_PROXY_HOPS >= 1`) | cache the token, re-exchange about 60 s before expiry, honour `Retry-After` on `429` |
 | care-service, web clients | `GET /.well-known/jwks.json` | verify user access tokens locally | cache keys 5 min |

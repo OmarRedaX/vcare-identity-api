@@ -4,7 +4,7 @@ owner: identity-team
 service: identity-service
 status: draft
 diataxis: explanation
-last_verified: 2026-10-08
+last_verified: 2026-10-12
 tags: [architecture, future, roadmap, events, deferred]
 related: [system-design, service-auth, auth-tokens, api, design-baseline, deployment]
 ---
@@ -14,6 +14,17 @@ related: [system-design, service-auth, auth-tokens, api, design-baseline, deploy
 Everything here is **out of scope for MVP** (CLAUDE.md → Out of scope). Each item needs a
 `/system-design` session and an ADR before any code; items that add a runtime dependency need that ADR
 first by rule.
+
+## Deferred, not MVP
+
+| Item | MVP behavior | Revisit trigger | Decision |
+|---|---|---|---|
+| **Admin MFA** | Admins sign in with a password; MFA and step-up checks are not available. | First post-MVP security work, before requiring MFA for admin actions. | [ADR 0010](../adr/0010-manual-admin-provisioning-role-policies.md) |
+| **PII erasure, anonymization, and self-service account deletion** | There is no account-deletion endpoint or anonymization job. If an account is soft-deleted through an ops process, its row and PII are retained; erasure requests require manual ops handling. | Before GA or at the first privacy/legal review, whichever comes first; design the Care coordination needed for self-service deletion. | [ADR 0011](../adr/0011-pii-retained-on-soft-delete.md) |
+| **Admin provisioning CLI** | Ops manually inserts an admin row with an unusable argon2id password hash in an audited DB session; the admin sets a password through forgot/reset password. | After MVP, when manual provisioning volume or audit needs justify an automated workflow. | [ADR 0010](../adr/0010-manual-admin-provisioning-role-policies.md); [admin runbook](../runbook.md) |
+
+The sections below describe candidate designs, not MVP commitments. Revisit each item through design; supersede
+the linked ADR only if its decision changes.
 
 ## 1. Events: `user.registered`, `user.status_changed`
 **Status (2026-09-15):** the former known gap — an admin changing a **doctor's** status in Identity without
@@ -44,6 +55,7 @@ admin route still refuses doctor targets. A `user.status_changed` consumer remai
 - Cross-service: updates hub `architecture/landscape.md`, `data-ownership.md`, and likely a hub ADR.
 
 ## 2. Multi-factor authentication
+Deferred, not MVP ([ADR 0010](../adr/0010-manual-admin-provisioning-role-policies.md)). Candidate sequence:
 TOTP first, then WebAuthn. Admin accounts are the first candidates (mandatory MFA for `role=admin`).
 Implications: a `user_mfa_factors` table (secrets encrypted, recovery codes hashed), a two-step login
 (`mfa_required` challenge token), rate limits on code verification, an `amr` claim in access tokens so Care
@@ -73,15 +85,15 @@ AI booking agent acts **on behalf of a patient**, a delegated-token design (toke
 the patient `sub` and the client `azp`) is a separate `/system-design` topic.
 
 ## 6. Admin provisioning and hardening
-Deferred by [ADR 0010](../adr/0010-manual-admin-provisioning-role-policies.md); MVP inserts admins manually and
-they set their password through forgot/reset. Future, in priority order:
+Deferred by [ADR 0010](../adr/0010-manual-admin-provisioning-role-policies.md); MVP uses the manual
+[runbook procedure](../runbook.md). Candidate future work, in priority order:
 1. **Mandatory TOTP MFA for `role=admin`** (see §2) — the first post-MVP security item.
 2. An audited provisioning CLI (private network, one-off task) that creates the admin with an unusable password
    and queues a set-password invitation through the outbox, writing an audit row with `actor_service='ops-cli'`.
 3. Shorter admin token lifetimes (access 5 min, refresh 12 h), tighter admin login limit, new-device alert.
 
 ## 7. PII erasure
-Deferred by [ADR 0011](../adr/0011-pii-retained-on-soft-delete.md) — revisit **before GA** or at the first
+Deferred, not MVP, by [ADR 0011](../adr/0011-pii-retained-on-soft-delete.md) — revisit **before GA** or at the first
 privacy/legal review. Candidate design: ops-initiated soft delete (revoke all tokens) → 30-day grace → worker
 job anonymizes `email` (`deleted-<id>@invalid.vcare`), `phone`/`avatar_url` (`NULL`), `full_name`
 (`Deleted user`), and replaces `password_hash` with an unusable value; the id and `user_status_changes` are kept

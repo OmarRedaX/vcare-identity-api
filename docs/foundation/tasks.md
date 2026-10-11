@@ -3,9 +3,9 @@ title: foundation — Tasks
 owner: identity-team
 service: identity-service
 module: foundation
-status: in-progress
+status: done
 diataxis: reference
-last_verified: 2026-10-11
+last_verified: 2026-10-12
 tags: [tasks, foundation, bootstrap, infrastructure, health, docker, ci]
 related: [foundation-spec, foundation-brainstorm, foundation-manual-qa, infrastructure, deployment, overview, quickstart, adr-0014-health-liveness-readiness-split, adr-0015-foundation-runtime-dependencies]
 ---

@@ -3,7 +3,7 @@ title: Identity Service — Docs Index
 owner: identity-team
 service: identity-service
 status: draft
-last_verified: 2026-10-08
+last_verified: 2026-10-10
 tags: [index, router, identity]
 related: [service-card, system-design, runbook, quickstart]
 ---
@@ -95,7 +95,7 @@ module doc when it is created.
 |---|---|---|
 | [foundation/brainstorm.md](./foundation/brainstorm.md) | see the agreed scope of the starter skeleton (what is in and out before any business module) | explanation |
 | [foundation/spec.md](./foundation/spec.md) | build or change the skeleton: file list and exported APIs, env subset, error handler, logger redaction, idempotency and rate-limit behaviour, health, shutdown, Docker, CI, test plan; as-built divergences in §15 | reference |
-| [foundation/tasks.md](./foundation/tasks.md) | see what was built for the skeleton, what is still open (hub sync, Knex log follow-up), and the test counts | reference |
+| [foundation/tasks.md](./foundation/tasks.md) | see the foundation build status and the Care `origin/main` parity handoff | reference |
 | [auth/brainstorm.md](./auth/brainstorm.md) | see the agreed scope of the auth module (registration, login, refresh sessions, passwords, own profile, JWKS, token/RBAC infrastructure, outbox worker and email) and its open questions | explanation |
 | [auth/spec.md](./auth/spec.md) | build or change the auth module: migrations for users/refresh_tokens/password_resets/registration_challenges/outbox_jobs, every auth + JWKS endpoint (guard, policy, limiters, idempotency, headers), refresh rotation algorithm, password reset by 6-digit code, `lib/auth`, `lib/rbac`, password hashing, outbox worker, email adapters, purges, env, test plan; ready (v1.1.0, no open questions); its contract edits C-1…C-14 are applied and the module is built | reference |
 | [users/spec.md](./users/spec.md) | build or change the users module: admin list/get users, patient suspend/reinstate with `user_status_changes` history, session list/revoke, the shared status-change service method, and the ADR 0019/0020 lock order (user row first; `rotate` `FOR SHARE`) with its concurrency tests; ready (v1.0.1, no open questions; contract notes C-1/C-2 applied; as-built notes in §14, including refresh after suspension returning 401 `RefreshTokenInvalid`) | reference |
@@ -112,6 +112,7 @@ module doc when it is created.
 | [users/manual-qa.md](./users/manual-qa.md) | re-run or review the CURL checks of the five `/api/users` operations (RBAC, status transitions, session revocation, privacy) and the N-1 note on refresh after suspension | how-to |
 | [auth/manual-qa.md](./auth/manual-qa.md) | re-run or review the CURL checks of every `/api/auth/*` operation and the JWKS (enumeration safety, idempotency, refresh rotation/reuse/grace, rate limits, no-store, log PII scan) and see the open defects | how-to |
 | [foundation/manual-qa.md](./foundation/manual-qa.md) | re-run or review the CURL checks of health, request id, envelope, listener isolation, headers, CORS, and the readiness table with Redis/Postgres stopped | how-to |
+| [foundation/reviews/review-20260926-0835.md](./foundation/reviews/review-20260926-0835.md) | verify the reopened cursor validation finding and the foundation review history | reference |
 
 ---
 _Platform-scope questions (platform overview, deployment topology, capacity assumptions, who calls us, Care's

@@ -5,7 +5,7 @@ service: identity-service
 module: foundation
 status: in-progress
 diataxis: reference
-last_verified: 2026-10-04
+last_verified: 2026-10-10
 tags: [tasks, foundation, bootstrap, infrastructure, health, docker, ci]
 related: [foundation-spec, foundation-brainstorm, foundation-manual-qa, infrastructure, deployment, overview, quickstart, adr-0014-health-liveness-readiness-split, adr-0015-foundation-runtime-dependencies]
 ---
@@ -106,5 +106,13 @@ between the units; the hub sync and doc reconciliation happen after both land.
 - [x] (contract) `error.details` required; health operations declare `500 InternalError`; `additionalProperties: false` on health schemas; generic `CacheControlNoStore`
 - [x] (service) idempotency 429 delete + orphan-claim compensation; shutdown keep-alive drain and bounded pool close; readiness probe pool; client-side Postgres/Redis timeouts; trust-proxy env split; log error policy; OPTIONS 404; `degraded` flag; 499 requestId; cursor sort kinds; boot_failed; migration names
 - [x] (docs) spec §15.5, infrastructure, deployment, capacity, runbook, quickstart; compose/Dockerfile/curl script
-- [x] (tests) unit + integration additions for each fix (typecheck green; `npm test` 460+ green; integration green except a pre-existing auth `change-password` AccountSuspended case)
-- [ ] (docs) Care parity and hub contract sync for the items marked "Care parity" in the review (listed in the hand-off)
+- [x] (tests) unit + integration additions for the review fixes; current re-verification results and the resolved change-password/`AccountSuspended` case are recorded in the retained review
+- [x] (service) Complete the reopened cursor sort-kind validation finding in `reviews/review-20260926-0835.md`; string cursors currently accept numeric sort values.
+- [ ] (docs) Care parity and hub contract sync for the items marked "Care parity" in the review. Checked against `../vcare-care-api` **`origin/main`** on 2026-10-10; Care already has 429 idempotency lock release, late-claim compare-and-delete and disabled Redis command replay, keep-alive shutdown drain, OPTIONS 404, typed timestamp/text cursor decoders, extension-free migration names, Redis command timeout and breaker, loopback compose ports/root-owned runtime copies, and closed health body schemas. Remaining Care handoff:
+  - [ ] Capture `req.requestId` when the request logger middleware starts, then use that value in finish/close listeners (`src/lib/logger/request-logger.ts:24,48` on Care main); the listeners currently read the mutable request property at completion.
+  - [ ] Redact arbitrary non-`AppError` messages in Care's `serializeError` (`src/lib/logger/logger.ts:47-79`); the current non-Postgres branch returns `error.message`, which can contain a secret or PII. Retain safe name/code and stack frames only, as Identity does.
+  - [ ] Destroy the response/socket after a headers-sent error (`src/lib/error/errorHandler.ts:64-72`); Care currently calls `res.end()`, potentially completing a truncated response as success. Add a focused regression test.
+  - [ ] Add Redis TCP `keepAlive: 10000` to Care's `createRedis` options (`src/lib/redis/redis.ts:30-43`) and document/test it; command timeout and the circuit breaker are already present.
+  - [ ] Bring Care's contract conformance helper and health tests up to parity: derive the health operations' declared response statuses, headers and `x-error-codes` from the contract, check both listeners' 200/503 responses, and assert the TypeScript error-code set equals the contract enum (`tests/helpers/contract.ts:108-132`, `tests/integration/health.test.ts:353-363`). The existing helper reads status codes only.
+  - [ ] Require `details` in Care's `ErrorEnvelope.error` schema (`contracts/openapi.yaml:3947`) and add `details: []` to error examples; the service already emits it.
+  - [ ] Declare `500 InternalError` and `x-error-codes: [InternalError]` on all four Care health operations (`contracts/openapi.yaml:87-149`), and make `CacheControlNoStore`'s description generic (`contracts/openapi.yaml:2947`). Care's `HealthLive` and `HealthStatus` already have `additionalProperties: false`.

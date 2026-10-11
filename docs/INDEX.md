@@ -3,7 +3,7 @@ title: Identity Service — Docs Index
 owner: identity-team
 service: identity-service
 status: draft
-last_verified: 2026-10-11
+last_verified: 2026-10-12
 tags: [index, router, identity]
 related: [service-card, system-design, runbook, quickstart]
 ---
@@ -47,7 +47,7 @@ is the Diátaxis type — a label over the docs, not a folder tree. Binding rule
 | [architecture/auth-tokens.md](./architecture/auth-tokens.md) | understand signing keys, access claims, refresh rotation, grace window, reuse detection, revocation | explanation |
 | [architecture/service-auth.md](./architecture/service-auth.md) | understand client credentials, scopes, the service guard, onboarding a new service client | explanation |
 | [architecture/infrastructure.md](./architecture/infrastructure.md) | look up env vars (built vs planned), logging/redaction/metrics, error envelope, request id, health, shutdown, rate limits, idempotency, DB/Redis clients | reference |
-| [architecture/future.md](./architecture/future.md) | see what is deliberately deferred (events, MFA and admin provisioning, PII erasure, social login, email change, AI client) | explanation |
+| [architecture/future.md](./architecture/future.md) | see the consolidated "Deferred, not MVP" decisions for admin MFA, PII erasure/self-service deletion, and the admin provisioning CLI, plus other future work | explanation |
 
 ## Decisions (append-only)
 | ADR | Read it when you need to know why… | Lens |

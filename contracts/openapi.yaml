@@ -920,7 +920,7 @@ paths:
     patch:
       operationId: internalUpdateUserStatus
       tags: [internal-users]
-      summary: Apply an account status decided by Care (Integration Cases 1 and 3)
+      summary: Apply an account status decided by Care (Integration Cases 1, 3 and 4)
       description: |
         Care-allowed transitions: `pending → active|rejected` (Case 1), `rejected → pending` (Care re-opened a
         rejected application), `active → suspended` (Case 3), `suspended → active` (Case 4, doctor reinstatement
